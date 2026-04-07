@@ -1,0 +1,25 @@
+#!/bin/bash
+# =============================================================================
+# ohos-curl-fallback — curl wrapper with proxy fallback
+# Tries direct connection first. On failure, retries through proxy.
+# Placed in PATH before /usr/bin/curl by ohos.sh when proxy is configured.
+# =============================================================================
+REAL_CURL="$(command -v -p curl 2>/dev/null || echo /usr/bin/curl)"
+PROXY="${OHOS_CURL_PROXY:-}"
+CONNECT_TIMEOUT="${OHOS_CURL_CONNECT_TIMEOUT:-15}"
+
+if [ -z "$PROXY" ]; then
+    exec "$REAL_CURL" "$@"
+fi
+
+# Try direct first (with shorter connect timeout)
+"$REAL_CURL" --connect-timeout "$CONNECT_TIMEOUT" "$@" 2>/dev/null
+rc=$?
+
+if [ $rc -eq 0 ]; then
+    exit 0
+fi
+
+# Direct failed — retry through proxy
+echo "[ohos] curl direct failed (rc=$rc), retrying via proxy $PROXY" >&2
+exec "$REAL_CURL" --proxy "$PROXY" "$@"

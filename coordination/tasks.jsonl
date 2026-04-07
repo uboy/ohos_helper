@@ -1,0 +1,5 @@
+{"id":"inspect-current-state","status":"done","title":"Inspect current scripts, environment dependencies, repo location, and prebuilts symlink layout"}
+{"id":"write-design-artifacts","status":"done","title":"Create local research, plan, checklist, and state artifacts for the requested changes"}
+{"id":"implement-ohos-sh","status":"done","title":"Add command chaining, contextual help, dependency prompts, symlink handling, and stricter sync flow to ohos.sh"}
+{"id":"implement-helper","status":"done","title":"Improve ohos-helper.py deep help, grouping, and filtering"}
+{"id":"verify","status":"done","title":"Run shell and Python verification plus focused CLI checks"}
