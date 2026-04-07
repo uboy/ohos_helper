@@ -863,18 +863,27 @@ print_help_info() {
 info - show component metadata and optional BUILD.gn deep scan
 
 What it runs:
-  python3 "$OHOS_HELPER" info <component> [--deep] [--path-filter TEXT] [--target-filter TEXT]
+  python3 "$OHOS_HELPER" info <component> [--deep] [--path-filter TEXT] [--target-filter TEXT] [--target-type TYPE] [--view grouped|tree|flat] [--max-depth N] [--describe]
 
 Useful flags:
   --deep                 Scan BUILD.gn files under the component directory
   --path-filter TEXT     Keep only matching subdirectories in deep output
   --target-filter TEXT   Keep only matching target names in deep output
+  --target-type TYPE     Keep only matching target types like group or action
+  --view grouped         Group targets by directory
+  --view tree            Show directory hierarchy for step-by-step narrowing
+  --view flat            Show path:target lines for grep/less/filtering
+  --max-depth N          Limit tree expansion depth for tree view
+  --describe             Show file/line/type/deps/summary for each matched target
 
 Examples:
   ohos info ace_engine
   ohos info ace_engine --deep
   ohos info ace_engine --deep --path-filter arkts_frontend
   ohos info ace_engine --deep --target-filter native
+  ohos info ace_engine --deep --view tree --max-depth 2
+  ohos info ace_engine --deep --view tree --max-depth 3 | less -R
+  ohos info ace_engine --deep --target-filter linux_unittest --describe
 HELP
 }
 

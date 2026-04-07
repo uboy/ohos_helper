@@ -45,6 +45,37 @@ Out of scope for this patch:
    - improve grouped summary output
 7. Run targeted verification on shell syntax and Python CLI help.
 
+## Follow-up implementation plan
+
+1. Parse richer target metadata from `BUILD.gn` instead of only target names.
+2. Add summaries for:
+   - target type
+   - directory depth
+3. Add output views:
+   - `grouped`
+   - `tree`
+   - `flat`
+4. Add navigation flags:
+   - `--target-type`
+   - `--max-depth`
+   - `--describe`
+5. Update `ohos.sh help info` and helper CLI examples.
+6. Verify on `ace_engine` for:
+   - tree view
+   - filtered tree view
+   - described target view
+
+## Backlog for next task
+
+1. Design repository import/update strategy for `gitee_util`.
+2. Design user-facing `ohos.sh` wrapper verbs for common PR flows.
+3. Design repository import/update strategy for `arkui-xts-selector`.
+4. Design user-facing `ohos.sh` wrapper verbs for common XTS selector flows.
+5. Split XTS-related wrapper flows into explicit user entry points for:
+   - SDK download
+   - firmware handling
+   - tests handling
+
 ## Command-chain parsing rule
 
 - Safe chain targets for this iteration:

@@ -3,6 +3,8 @@
 Date: 2026-04-07
 Status: implementation and verification complete
 
+Update: follow-up helper enhancement complete
+
 ## Current context
 
 - Task is treated as a non-trivial repo change.
@@ -43,3 +45,44 @@ Status: implementation and verification complete
 
 - Interactive install prompts for missing `repo` / `nvm` / `npm` were implemented but not exercised live because those tools are already installed in the current environment.
 - Chained mutating flows such as `ohos init sync build` were validated by parser and help paths, but not executed against a fresh repo during this session.
+
+## New requested enhancement
+
+- Make `ohos info <component> --deep` navigable by hierarchy, not only by flat directory groups.
+- Add richer per-target metadata so the output explains target meaning better.
+- Target approach:
+  - tree view for directory navigation
+  - grouped and flat views for listing
+  - heuristic target descriptions from comments and block metadata
+
+## Follow-up completion
+
+- Added target metadata parsing from `BUILD.gn`:
+  - type
+  - file and line
+  - `testonly`
+  - direct deps preview
+  - sources count
+  - `script` / `output_name`
+  - nearest leading comment
+- Added `--view grouped|tree|flat`
+- Added `--target-type`
+- Added `--max-depth` for tree mode
+- Added `--describe`
+- Updated shell help so `ohos.sh help info` documents the new flags
+
+## Follow-up verification
+
+- `python3 -m py_compile ohos-helper.py`
+- `bash -n ohos.sh`
+- `python3 ohos-helper.py info --help`
+- `bash ohos.sh help info`
+- `python3 /data/shared/common/scripts/ohos-helper.py info ace_engine --deep --view tree --max-depth 2`
+- `python3 /data/shared/common/scripts/ohos-helper.py info ace_engine --deep --target-filter linux_unittest --describe`
+- `python3 /data/shared/common/scripts/ohos-helper.py info ace_engine --deep --view flat --target-type group --path-filter frameworks/bridge/arkts_frontend`
+
+## Pending next scope
+
+- `gitee_util` exists at `/home/dmazur/proj/gitee_util`
+- `arkui-xts-selector` exists at `/home/dmazur/proj/arkui-xts-selector`
+- Requested next step is to bring both under `/data/shared/common/scripts` with updateable git-backed layout and `ohos.sh` wrappers for common user paths

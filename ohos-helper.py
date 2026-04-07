@@ -16,11 +16,15 @@ COMPONENT_ROOTS = [
     "arkcompiler",
 ]
 
-GN_TARGET_RE = re.compile(
-    r'^\s*(?:ohos_\w+|group|action|action_foreach|executable|shared_library|static_library|source_set)'
-    r'\("([^"]+)"\)',
-    re.MULTILINE,
+TARGET_DEF_RE = re.compile(
+    r'^\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*)\("(?P<name>[^"]+)"\)\s*\{'
 )
+QUOTED_STRING_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
+DOUBLE_QUOTED_SEGMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+TESTONLY_RE = re.compile(r"^\s*testonly\s*=\s*true\b", re.MULTILINE)
+SCRIPT_RE = re.compile(r'^\s*script\s*=\s*"([^"]+)"', re.MULTILINE)
+OUTPUT_NAME_RE = re.compile(r'^\s*output_name\s*=\s*"([^"]+)"', re.MULTILINE)
+EXCLUDED_TARGET_TYPES = {"template", "config", "declare_args"}
 
 
 def section_rule(char="=", width=68):
@@ -96,67 +100,351 @@ def find_bundle_json(component_name):
     return None, None
 
 
+def strip_quoted_strings(line):
+    return DOUBLE_QUOTED_SEGMENT_RE.sub('""', line)
+
+
+def find_target_block_end(lines, start_index):
+    depth = 0
+    seen_open_brace = False
+
+    for index in range(start_index, len(lines)):
+        code_part = lines[index].split("#", 1)[0]
+        sanitized = strip_quoted_strings(code_part)
+        if "{" in sanitized:
+            seen_open_brace = True
+        depth += sanitized.count("{")
+        depth -= sanitized.count("}")
+        if seen_open_brace and depth <= 0:
+            return index
+
+    return start_index
+
+
+def extract_leading_comment(lines, start_index):
+    comments = []
+    index = start_index - 1
+    while index >= 0:
+        stripped = lines[index].strip()
+        if not stripped:
+            if comments:
+                break
+            return ""
+        if stripped.startswith("#"):
+            text = stripped[1:].strip()
+            if text:
+                comments.insert(0, text)
+            index -= 1
+            continue
+        break
+    return " ".join(comments)
+
+
+def extract_first_match(pattern, text):
+    match = pattern.search(text)
+    return match.group(1) if match else ""
+
+
+def extract_list_values(block_text, variable_names):
+    names = "|".join(re.escape(name) for name in variable_names)
+    pattern = re.compile(
+        rf"^\s*(?:{names})\s*(?:\+?=)\s*\[(.*?)\]",
+        re.MULTILINE | re.DOTALL,
+    )
+    values = []
+    for match in pattern.finditer(block_text):
+        values.extend(QUOTED_STRING_RE.findall(match.group(1)))
+    return values
+
+
+def build_target_summary(entry):
+    if entry["comment"]:
+        summary = entry["comment"]
+    else:
+        location = entry["rel_dir"] or "(root)"
+        summary = f"{entry['type']} target in {location}"
+
+    details = []
+    if entry["testonly"]:
+        details.append("testonly")
+    if entry["script"]:
+        details.append(f"script={entry['script']}")
+    if entry["output_name"]:
+        details.append(f"output={entry['output_name']}")
+    if entry["dep_count"]:
+        details.append(f"deps={entry['dep_count']}")
+    if entry["sources_count"]:
+        details.append(f"sources={entry['sources_count']}")
+
+    if details:
+        summary += f" ({', '.join(details)})"
+    return summary
+
+
 def scan_gn_targets(component_dir):
-    targets = {}
+    entries = []
     pattern = os.path.join(component_dir, "**", "BUILD.gn")
     for gn_path in glob.glob(pattern, recursive=True):
         try:
             with open(gn_path, "r", encoding="utf-8") as file_obj:
-                content = file_obj.read()
+                lines = file_obj.read().splitlines()
         except (OSError, UnicodeDecodeError):
-            continue
-
-        found = sorted(set(GN_TARGET_RE.findall(content)))
-        if not found:
             continue
 
         rel_dir = os.path.relpath(os.path.dirname(gn_path), component_dir)
         if rel_dir == ".":
             rel_dir = ""
-        targets[rel_dir] = found
-    return targets
+
+        index = 0
+        while index < len(lines):
+            match = TARGET_DEF_RE.match(lines[index])
+            if not match:
+                index += 1
+                continue
+
+            target_type = match.group("type")
+            if target_type in EXCLUDED_TARGET_TYPES:
+                index += 1
+                continue
+
+            end_index = find_target_block_end(lines, index)
+            block_lines = lines[index : end_index + 1]
+            block_text = "\n".join(block_lines)
+            deps = extract_list_values(
+                block_text,
+                ["deps", "public_deps", "external_deps", "data_deps"],
+            )
+            sources = extract_list_values(block_text, ["sources"])
+
+            entry = {
+                "name": match.group("name"),
+                "type": target_type,
+                "rel_dir": rel_dir,
+                "dir_parts": [] if not rel_dir else rel_dir.split(os.sep),
+                "build_file": gn_path,
+                "build_file_rel": os.path.relpath(gn_path, component_dir),
+                "line": index + 1,
+                "comment": extract_leading_comment(lines, index),
+                "testonly": bool(TESTONLY_RE.search(block_text)),
+                "script": extract_first_match(SCRIPT_RE, block_text),
+                "output_name": extract_first_match(OUTPUT_NAME_RE, block_text),
+                "deps": deps,
+                "dep_count": len(deps),
+                "sources_count": len(sources),
+            }
+            entry["summary"] = build_target_summary(entry)
+            entries.append(entry)
+            index = end_index + 1
+
+    entries.sort(key=lambda item: (item["rel_dir"], item["name"]))
+    return entries
 
 
-def filter_gn_targets(targets, path_filter=None, target_filter=None):
-    filtered = {}
+def filter_target_entries(entries, path_filter=None, target_filter=None, target_type=None):
     path_filter = path_filter.lower() if path_filter else None
     target_filter = target_filter.lower() if target_filter else None
+    target_type = target_type.lower() if target_type else None
 
-    for rel_dir, names in sorted(targets.items()):
-        dir_label = rel_dir or "(root)"
+    filtered = []
+    for entry in entries:
+        dir_label = entry["rel_dir"] or "(root)"
         if path_filter and path_filter not in dir_label.lower():
             continue
-
-        matched = names
-        if target_filter:
-            matched = [name for name in names if target_filter in name.lower()]
-
-        if matched:
-            filtered[rel_dir] = matched
-
+        if target_filter and target_filter not in entry["name"].lower():
+            continue
+        if target_type and target_type != entry["type"].lower():
+            continue
+        filtered.append(entry)
     return filtered
 
 
-def summarize_top_groups(targets):
-    summary = defaultdict(lambda: {"directories": 0, "targets": 0})
-    for rel_dir, names in targets.items():
-        if not rel_dir:
-            group_name = "(root)"
-        else:
-            group_name = rel_dir.split(os.sep, 1)[0]
-        summary[group_name]["directories"] += 1
-        summary[group_name]["targets"] += len(names)
+def summarize_top_groups(entries):
+    summary = defaultdict(lambda: {"directories": set(), "targets": 0})
+    for entry in entries:
+        group_name = entry["dir_parts"][0] if entry["dir_parts"] else "(root)"
+        summary[group_name]["directories"].add(entry["rel_dir"])
+        summary[group_name]["targets"] += 1
     return summary
 
 
-def total_targets(targets):
-    return sum(len(names) for names in targets.values())
+def summarize_target_types(entries):
+    summary = defaultdict(int)
+    for entry in entries:
+        summary[entry["type"]] += 1
+    return summary
 
 
-def print_list_section(title, items, prefix="  - "):
-    print(f"\n{title}:")
-    for item in items:
-        print(f"{prefix}{item}")
+def summarize_directory_depths(entries):
+    summary = defaultdict(lambda: {"directories": set(), "targets": 0})
+    for entry in entries:
+        depth = len(entry["dir_parts"])
+        summary[depth]["directories"].add(entry["rel_dir"])
+        summary[depth]["targets"] += 1
+    return summary
+
+
+def group_entries_by_directory(entries):
+    grouped = defaultdict(list)
+    for entry in entries:
+        grouped[entry["rel_dir"]].append(entry)
+    return grouped
+
+
+def format_preview_list(values, limit=4):
+    preview = values[:limit]
+    text = ", ".join(preview)
+    if len(values) > limit:
+        text += f", ... (+{len(values) - limit})"
+    return text
+
+
+def target_label(entry, include_path=False, include_type=False):
+    if include_path:
+        path_prefix = entry["rel_dir"] or "(root)"
+        label = f"{path_prefix}:{entry['name']}"
+    else:
+        label = f":{entry['name']}"
+
+    if include_type:
+        label += f" [{entry['type']}]"
+    return label
+
+
+def describe_target_lines(entry):
+    lines = [
+        f"summary: {entry['summary']}",
+        f"file: {entry['build_file_rel']}:{entry['line']}",
+    ]
+
+    meta = []
+    if entry["testonly"]:
+        meta.append("testonly=true")
+    if entry["output_name"]:
+        meta.append(f"output_name={entry['output_name']}")
+    if entry["script"]:
+        meta.append(f"script={entry['script']}")
+    if entry["dep_count"]:
+        meta.append(f"deps={entry['dep_count']}")
+    if entry["sources_count"]:
+        meta.append(f"sources={entry['sources_count']}")
+    if meta:
+        lines.append(f"meta: {', '.join(meta)}")
+
+    if entry["deps"]:
+        lines.append(f"deps: {format_preview_list(entry['deps'])}")
+    return lines
+
+
+def print_target_entry(entry, indent="  ", describe=False, include_path=False):
+    print(f"{indent}{target_label(entry, include_path=include_path, include_type=describe)}")
+    if describe:
+        for line in describe_target_lines(entry):
+            print(f"{indent}  {line}")
+
+
+def print_grouped_entries(entries, describe=False):
+    print("\nTargets By Directory (grouped view):")
+    grouped = group_entries_by_directory(entries)
+    for rel_dir in sorted(grouped):
+        dir_label = rel_dir or "(root)"
+        targets = grouped[rel_dir]
+        print(f"\n  [{dir_label}] ({len(targets)} targets)")
+        for entry in targets:
+            print_target_entry(entry, indent="    ", describe=describe)
+
+
+def print_flat_entries(entries, describe=False):
+    print("\nTargets (flat view):")
+    for entry in entries:
+        print_target_entry(entry, indent="  ", describe=describe, include_path=True)
+
+
+def make_tree_node(name, path):
+    return {
+        "name": name,
+        "path": path,
+        "children": {},
+        "entries": [],
+        "target_count": 0,
+        "dir_count": 0,
+    }
+
+
+def build_directory_tree(entries):
+    root = make_tree_node(".", "")
+    for entry in entries:
+        node = root
+        node["target_count"] += 1
+        current_path = []
+        for part in entry["dir_parts"]:
+            current_path.append(part)
+            if part not in node["children"]:
+                node["children"][part] = make_tree_node(part, os.sep.join(current_path))
+            node = node["children"][part]
+            node["target_count"] += 1
+        node["entries"].append(entry)
+    compute_tree_dir_counts(root)
+    return root
+
+
+def compute_tree_dir_counts(node):
+    dir_count = len(node["children"])
+    for child in node["children"].values():
+        dir_count += compute_tree_dir_counts(child)
+    node["dir_count"] = dir_count
+    return dir_count
+
+
+def format_tree_directory_label(node):
+    suffix = f"{node['target_count']} targets"
+    if node["dir_count"]:
+        suffix += f", {node['dir_count']} subdirs"
+    return f"{node['name']}/ ({suffix})"
+
+
+def print_tree_children(node, prefix="", depth=0, max_depth=None, describe=False):
+    items = []
+    for child_name in sorted(node["children"]):
+        items.append(("dir", node["children"][child_name]))
+    for entry in sorted(node["entries"], key=lambda item: item["name"]):
+        items.append(("target", entry))
+
+    for index, item in enumerate(items):
+        is_last = index == len(items) - 1
+        connector = "`- " if is_last else "|- "
+        next_prefix = prefix + ("   " if is_last else "|  ")
+        item_type, payload = item
+
+        if item_type == "dir":
+            label = format_tree_directory_label(payload)
+            if max_depth is not None and depth + 1 >= max_depth:
+                print(f"{prefix}{connector}{label} [collapsed]")
+                continue
+            print(f"{prefix}{connector}{label}")
+            print_tree_children(
+                payload,
+                prefix=next_prefix,
+                depth=depth + 1,
+                max_depth=max_depth,
+                describe=describe,
+            )
+            continue
+
+        label = target_label(payload, include_type=describe)
+        print(f"{prefix}{connector}{label}")
+        if describe:
+            for line in describe_target_lines(payload):
+                print(f"{next_prefix}{line}")
+
+
+def print_tree(entries, max_depth=None, describe=False):
+    root = build_directory_tree(entries)
+    print("\nDirectory Tree (tree view):")
+    root_suffix = f"{root['target_count']} targets"
+    if root["dir_count"]:
+        root_suffix += f", {root['dir_count']} subdirs"
+    print(f"  . ({root_suffix})")
+    print_tree_children(root, prefix="  ", depth=0, max_depth=max_depth, describe=describe)
 
 
 def print_build_targets(build):
@@ -205,58 +493,96 @@ def print_build_targets(build):
         print("\nNo build targets found in bundle.json.")
 
 
-def print_deep_scan(component_dir, path_filter=None, target_filter=None):
+def print_deep_scan(
+    component_dir,
+    path_filter=None,
+    target_filter=None,
+    target_type=None,
+    view="grouped",
+    max_depth=None,
+    describe=False,
+):
     print(f"\n{section_rule()}")
     print(f"BUILD.gn Targets (deep scan from {component_dir})")
 
-    scanned_targets = scan_gn_targets(component_dir)
-    if not scanned_targets:
+    scanned_entries = scan_gn_targets(component_dir)
+    if not scanned_entries:
         print("No BUILD.gn targets found.")
         return
 
-    filtered_targets = filter_gn_targets(
-        scanned_targets,
+    filtered_entries = filter_target_entries(
+        scanned_entries,
         path_filter=path_filter,
         target_filter=target_filter,
+        target_type=target_type,
     )
 
-    scanned_total = total_targets(scanned_targets)
-    filtered_total = total_targets(filtered_targets)
+    scanned_dirs = {entry["rel_dir"] for entry in scanned_entries}
+    filtered_dirs = {entry["rel_dir"] for entry in filtered_entries}
 
     print("\nScan Summary:")
-    print(f"  Directories scanned : {len(scanned_targets)}")
-    print(f"  Targets scanned     : {scanned_total}")
-    if path_filter or target_filter:
-        print(f"  Matched directories : {len(filtered_targets)}")
-        print(f"  Matched targets     : {filtered_total}")
+    print(f"  Directories scanned : {len(scanned_dirs)}")
+    print(f"  Targets scanned     : {len(scanned_entries)}")
+    print(f"  Active view         : {view}")
+    if describe:
+        print("  Describe mode       : enabled")
+    if path_filter or target_filter or target_type:
+        print(f"  Matched directories : {len(filtered_dirs)}")
+        print(f"  Matched targets     : {len(filtered_entries)}")
         if path_filter:
             print(f"  Path filter         : {path_filter}")
         if target_filter:
             print(f"  Target filter       : {target_filter}")
+        if target_type:
+            print(f"  Target type filter  : {target_type}")
+    if max_depth is not None and view == "tree":
+        print(f"  Tree max depth      : {max_depth}")
 
-    if not filtered_targets:
+    if not filtered_entries:
         print("\nNo BUILD.gn targets matched the active filters.")
         return
 
-    top_groups = summarize_top_groups(filtered_targets)
+    type_summary = summarize_target_types(filtered_entries)
+    print("\nTarget Types:")
+    for type_name in sorted(type_summary):
+        print(f"  - {type_name:<24} {type_summary[type_name]:>4} targets")
+
+    top_groups = summarize_top_groups(filtered_entries)
     print("\nTop-Level Groups:")
     for group_name in sorted(top_groups):
         group_info = top_groups[group_name]
         print(
             f"  - {group_name:<24} "
-            f"{group_info['targets']:>4} targets in {group_info['directories']:>3} directories"
+            f"{group_info['targets']:>4} targets in {len(group_info['directories']):>3} directories"
         )
 
-    print("\nTargets By Directory:")
-    for rel_dir in sorted(filtered_targets):
-        names = filtered_targets[rel_dir]
-        dir_label = rel_dir or "(root)"
-        print(f"\n  [{dir_label}] ({len(names)} targets)")
-        for name in names:
-            print(f"    :{name}")
+    depth_summary = summarize_directory_depths(filtered_entries)
+    print("\nDirectory Depths:")
+    for depth in sorted(depth_summary):
+        depth_info = depth_summary[depth]
+        print(
+            f"  - depth {depth:<2} "
+            f"{depth_info['targets']:>4} targets in {len(depth_info['directories']):>3} directories"
+        )
+
+    if view == "grouped":
+        print_grouped_entries(filtered_entries, describe=describe)
+    elif view == "tree":
+        print_tree(filtered_entries, max_depth=max_depth, describe=describe)
+    elif view == "flat":
+        print_flat_entries(filtered_entries, describe=describe)
 
 
-def show_component_info(component_name, deep=False, path_filter=None, target_filter=None):
+def show_component_info(
+    component_name,
+    deep=False,
+    path_filter=None,
+    target_filter=None,
+    target_type=None,
+    view="grouped",
+    max_depth=None,
+    describe=False,
+):
     path, data = find_bundle_json(component_name)
     if not data:
         print(f"Error: Component '{component_name}' metadata (bundle.json) not found.")
@@ -287,6 +613,10 @@ def show_component_info(component_name, deep=False, path_filter=None, target_fil
             component_dir,
             path_filter=path_filter,
             target_filter=target_filter,
+            target_type=target_type,
+            view=view,
+            max_depth=max_depth,
+            describe=describe,
         )
 
     print(f"\n{section_rule()}")
@@ -296,7 +626,8 @@ def show_component_info(component_name, deep=False, path_filter=None, target_fil
         print(f"  With feature:     ./build.sh --product-name rk3568 --gn-args {features[0]}=true")
     if not deep:
         print(f"  Deep scan:        ohos info {component_name} --deep")
-        print(f"  Filtered scan:    ohos info {component_name} --deep --path-filter arkts_frontend")
+        print(f"  Tree view:        ohos info {component_name} --deep --view tree --max-depth 2")
+        print(f"  Describe target:  ohos info {component_name} --deep --target-filter linux_unittest --describe")
     return 0
 
 
@@ -327,7 +658,9 @@ General workflow:
   3. Inspect one component:   python3 ohos-helper.py info ace_engine
   4. Deep-scan BUILD.gn:      python3 ohos-helper.py info ace_engine --deep
   5. Filter deep results:     python3 ohos-helper.py info ace_engine --deep --path-filter arkts_frontend --target-filter native
-  6. Run build:               ./build.sh --product-name rk3568 --build-target ace_engine
+  6. Browse as tree:          python3 ohos-helper.py info ace_engine --deep --view tree --max-depth 2 | less -R
+  7. Describe one target:     python3 ohos-helper.py info ace_engine --deep --target-filter linux_unittest --describe
+  8. Run build:               ./build.sh --product-name rk3568 --build-target ace_engine
 """,
     )
 
@@ -356,8 +689,10 @@ General workflow:
 Examples:
   python3 ohos-helper.py info ace_engine
   python3 ohos-helper.py info ace_engine --deep
-  python3 ohos-helper.py info ace_engine --deep --path-filter arkts_frontend
-  python3 ohos-helper.py info ace_engine --deep --target-filter native
+  python3 ohos-helper.py info ace_engine --deep --view tree --max-depth 2
+  python3 ohos-helper.py info ace_engine --deep --target-type group --target-filter linux
+  python3 ohos-helper.py info ace_engine --deep --path-filter test/unittest --describe
+  python3 ohos-helper.py info ace_engine --deep --view tree --max-depth 3 | less -R
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -374,6 +709,26 @@ Examples:
     info_parser.add_argument(
         "--target-filter",
         help="Keep only deep-scan targets whose name contains this text",
+    )
+    info_parser.add_argument(
+        "--target-type",
+        help="Keep only deep-scan targets of this type (for example: group, action, ohos_shared_library)",
+    )
+    info_parser.add_argument(
+        "--view",
+        choices=["grouped", "tree", "flat"],
+        default="grouped",
+        help="How to render deep-scan results",
+    )
+    info_parser.add_argument(
+        "--max-depth",
+        type=int,
+        help="Limit tree expansion depth when --view tree is used",
+    )
+    info_parser.add_argument(
+        "--describe",
+        action="store_true",
+        help="Show file, line, type, deps, and heuristic target meaning in deep output",
     )
 
     subparsers.add_parser(
@@ -402,13 +757,31 @@ def main():
         return 0
 
     if args.command == "info":
-        if (args.path_filter or args.target_filter) and not args.deep:
-            parser.error("--path-filter and --target-filter require --deep")
+        deep_only_args_used = any(
+            [
+                args.path_filter,
+                args.target_filter,
+                args.target_type,
+                args.view != "grouped",
+                args.max_depth is not None,
+                args.describe,
+            ]
+        )
+        if deep_only_args_used and not args.deep:
+            parser.error(
+                "--path-filter, --target-filter, --target-type, --view, --max-depth, and --describe require --deep"
+            )
+        if args.max_depth is not None and args.max_depth < 1:
+            parser.error("--max-depth must be >= 1")
         return show_component_info(
             args.component,
             deep=args.deep,
             path_filter=args.path_filter,
             target_filter=args.target_filter,
+            target_type=args.target_type,
+            view=args.view,
+            max_depth=args.max_depth,
+            describe=args.describe,
         )
 
     if args.command == "params":

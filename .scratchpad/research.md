@@ -97,3 +97,66 @@ Reasoning:
   - LFS storage configuration and checkout
   - prebuilts download
 - Extend `ohos-helper.py info` with filters and structured deep output.
+
+## Follow-up enhancement request
+
+The current `--deep` output is now usable but still too large for exploratory navigation.
+The next requested improvement is to help users answer three questions faster:
+
+1. How is the component laid out by directory depth and hierarchy?
+2. What does a specific target roughly mean?
+3. How can a user narrow the output before opening a `BUILD.gn` manually?
+
+### Practical data that can be extracted reliably
+
+From `BUILD.gn` we can derive per target:
+
+- target name
+- target type (`group`, `action`, `ohos_shared_library`, etc.)
+- directory path
+- build file path and line
+- `testonly = true`
+- direct dependency labels found in `deps`/`public_deps`/`external_deps`/`data_deps`
+- `sources` count
+- local `script` or `output_name` for action-like targets
+- contiguous comment lines immediately above the target, when present
+
+### Limits
+
+- There is usually no formal human description field for GN targets.
+- Any "description" must therefore be heuristic:
+  - nearest leading comment, when available
+  - otherwise a generated summary from type/path/testonly/deps/sources metadata
+
+### Planned UX additions
+
+- deep summary by target type
+- deep summary by directory depth
+- `--view grouped|tree|flat`
+- `--describe` to print target metadata and heuristic meaning
+- `--target-type TYPE` filter
+- `--max-depth N` for tree view
+- examples for using tree output with `less`
+
+## Next requested features
+
+Two follow-up wrapper features were requested and should be treated as a new tracked scope:
+
+1. `gitee_util` wrapper
+   - source repo: `/home/dmazur/proj/gitee_util`
+   - desired outcome:
+     - clone or copy it under `/data/shared/common/scripts`
+     - keep it updateable from git
+     - add `ohos.sh` wrapper commands for the main user PR flows
+     - focus on creating and updating PRs
+
+2. `arkui-xts-selector` wrapper
+   - source repo: `/home/dmazur/proj/arkui-xts-selector`
+   - desired outcome:
+     - copy it under `/data/shared/common/scripts`
+     - keep it updateable from git
+     - add `ohos.sh` wrapper commands for the main user flows
+     - expose separate convenience entry points for:
+       - SDK download
+       - firmware download / flashing related flow
+       - test download / execution related flow
