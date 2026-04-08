@@ -1,4 +1,16 @@
 #!/bin/bash
+# Allow accidental `sh ./ohos.sh` launches by restarting under bash early,
+# before the shell reaches bash-specific syntax later in the file.
+if [ -z "${BASH_VERSION:-}" ]; then
+    case "$0" in
+        */ohos.sh|ohos.sh)
+            exec bash "$0" "$@"
+            ;;
+    esac
+    printf '%s\n' "ohos.sh requires bash. Run it with: bash /data/shared/common/scripts/ohos.sh ..." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # =============================================================================
 # ohos.sh - unified OpenHarmony repo management tool
 # =============================================================================
@@ -709,16 +721,8 @@ cmd_gc() {
     info "Maintenance complete."
 }
 
-cmd_build() {
-    require_ohos_repo
-    ensure_build_prereqs
-
-    local target="sdk"
-    if [ $# -gt 0 ]; then
-        target="$1"
-        shift
-    fi
-
+resolve_build_args() {
+    local target="${1:-sdk}"
     local build_args=""
     case "$target" in
         sdk) build_args="$BUILD_SDK" ;;
@@ -734,8 +738,42 @@ cmd_build() {
             ;;
     esac
 
-    info "Building: ./build.sh $build_args $*"
-    time ./build.sh $build_args "$@"
+    printf '%s\n' "$build_args"
+}
+
+cmd_build_impl() {
+    local fast_rebuild="${1:-false}"
+    shift || true
+
+    require_ohos_repo
+    ensure_build_prereqs
+
+    local target="sdk"
+    if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+        target="$1"
+        shift
+    fi
+
+    local build_args
+    build_args="$(resolve_build_args "$target")"
+
+    local build_mode_args=()
+    local build_mode_prefix=""
+    if [ "$fast_rebuild" = "true" ]; then
+        build_mode_args+=(--fast-rebuild)
+        build_mode_prefix="--fast-rebuild "
+    fi
+
+    info "Building: ./build.sh ${build_mode_prefix}${build_args} $*"
+    time ./build.sh "${build_mode_args[@]}" $build_args "$@"
+}
+
+cmd_build() {
+    cmd_build_impl false "$@"
+}
+
+cmd_fast_rebuild() {
+    cmd_build_impl true "$@"
 }
 
 cmd_manifest_save() {
@@ -1213,6 +1251,7 @@ Chainable commands:
   reset [options]          Hard-reset all sub-repos, remove artifacts, optionally sync
   gc [options]             Maintenance: lfs prune + git gc
   build [target] [args]    Build a target; chained build should be the final command
+  fr [target] [args]       Quick rebuild with ./build.sh --fast-rebuild
 
 Tool commands:
   download [subcommand]    Download daily SDK / firmware / XTS test packages
@@ -1234,6 +1273,7 @@ Useful examples:
   ohos init
   ohos init --branch weekly_20260330 sync build rk3568
   ohos sync build sdk-linux
+  ohos fr rk3568
   ohos help sync
   ohos help reset
   ohos info ace_engine --deep --path-filter arkts_frontend --target-filter native
@@ -1326,13 +1366,38 @@ Common aliases:
 Behavior:
   - Unknown targets are treated as product names:
       ./build.sh --product-name <target> --ccache
+  - For a quick rebuild of an already-configured tree, use:
+      ohos fr <target>
   - In a chained invocation, build should be the final command.
 
 Examples:
   ohos build
   ohos build rk3568
+  ohos fr rk3568
   ohos sync build sdk-linux
   ohos build rk3568 --gn-args is_debug=true
+HELP
+}
+
+print_help_fast_rebuild() {
+    cat <<HELP
+fr - run ./build.sh with --fast-rebuild for an already-configured tree
+
+Aliases:
+  fr
+  fast-rebuild
+
+Behavior:
+  - Prepends --fast-rebuild to the normal wrapper build flow
+  - Reuses the same target aliases as 'ohos build'
+  - Intended for quick rebuilds after the initial full configuration
+  - In a chained invocation, fr should be the final command
+
+Examples:
+  ohos fr
+  ohos fr rk3568
+  ohos fast-rebuild rk3568 --build-target ace_engine
+  ohos sync fr rk3568
 HELP
 }
 
@@ -1387,6 +1452,7 @@ Output includes:
   - resolved file path
   - direct GN targets that list the file in sources
   - reverse dependent targets inside the scanned scope
+  - likely binary/package outputs inferred from direct targets, reverse deps, and build metadata
   - related component/product build hints when bundle.json metadata is available
 
 Examples:
@@ -1580,6 +1646,7 @@ cmd_help() {
         init) print_help_init ;;
         sync) print_help_sync ;;
         build) print_help_build ;;
+        fr|fast-rebuild) print_help_fast_rebuild ;;
         reset) print_help_reset ;;
         info) print_help_info ;;
         file) print_help_file ;;
@@ -1599,7 +1666,7 @@ cmd_help() {
 
 is_chainable_command() {
     case "$1" in
-        init|sync|reset|gc|build) return 0 ;;
+        init|sync|reset|gc|build|fr|fast-rebuild) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -1755,6 +1822,10 @@ while [ $# -gt 0 ]; do
                 esac
             done
             cmd_gc "${gc_args[@]}"
+            ;;
+        fr|fast-rebuild)
+            cmd_fast_rebuild "$@"
+            break
             ;;
         build)
             cmd_build "$@"

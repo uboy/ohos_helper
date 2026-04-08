@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fnmatch
 import glob
 import json
 import os
@@ -17,16 +18,40 @@ COMPONENT_ROOTS = [
 ]
 
 TARGET_DEF_RE = re.compile(
-    r'^\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*)\("(?P<name>[^"]+)"\)\s*\{'
+    r'^\s*(?P<type>[A-Za-z_][A-Za-z0-9_]*)\((?P<name_expr>.+?)\)\s*\{'
 )
 QUOTED_STRING_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 DOUBLE_QUOTED_SEGMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"')
 TESTONLY_RE = re.compile(r"^\s*testonly\s*=\s*true\b", re.MULTILINE)
 SCRIPT_RE = re.compile(r'^\s*script\s*=\s*"([^"]+)"', re.MULTILINE)
 OUTPUT_NAME_RE = re.compile(r'^\s*output_name\s*=\s*"([^"]+)"', re.MULTILINE)
+ASSIGNMENT_RE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>.+?)\s*$")
 EXCLUDED_TARGET_TYPES = {"template", "config", "declare_args"}
 SEARCH_SKIP_DIRS = {".git", ".repo", "out", "prebuilts", "__pycache__"}
 LIST_ASSIGN_RE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\+?=)\s*\[")
+ARTIFACT_OUTPUT_LIST_NAMES = ["outputs", "out_puts"]
+ARTIFACT_OUTPUT_VALUE_NAMES = ["output", "dst_file", "source"]
+INSTALL_DIR_VALUE_NAMES = ["module_install_dir", "relative_install_dir"]
+
+DIRECT_ARTIFACT_TARGET_TYPES = {
+    "ohos_shared_library": {"kind": "shared_library", "name_pattern": "lib{name}.z.so"},
+    "shared_library": {"kind": "shared_library", "name_pattern": "lib{name}.so"},
+    "ohos_static_library": {"kind": "static_library", "name_pattern": "lib{name}.a"},
+    "static_library": {"kind": "static_library", "name_pattern": "lib{name}.a"},
+    "ohos_executable": {"kind": "executable", "name_pattern": "{name}"},
+    "executable": {"kind": "executable", "name_pattern": "{name}"},
+    "ohos_prebuilt_etc": {"kind": "prebuilt_etc", "name_pattern": "{name}"},
+}
+
+NON_STANDALONE_TARGET_TYPES = {
+    "group",
+    "source_set",
+    "ohos_source_set",
+    "build_component",
+    "build_component_ng",
+    "ace_core_source_set",
+    "ace_core_ng_source_set",
+}
 
 
 def section_rule(char="=", width=68):
@@ -164,6 +189,37 @@ def strip_quoted_strings(line):
     return DOUBLE_QUOTED_SEGMENT_RE.sub('""', line)
 
 
+def normalize_wildcard_token(value):
+    if not value:
+        return ""
+    normalized = re.sub(r"\$\{[^}]+\}", "*", value)
+    normalized = re.sub(r"\$[A-Za-z_][A-Za-z0-9_]*", "*", normalized)
+    normalized = re.sub(r"\s*\+\s*", "", normalized)
+    normalized = normalized.replace('"', "")
+    normalized = normalized.replace("'", "")
+    normalized = re.sub(r"\*{2,}", "*", normalized)
+    return normalized.strip()
+
+
+def normalize_target_name_expr(name_expr):
+    raw = (name_expr or "").strip()
+    if not raw:
+        return ""
+
+    quoted_parts = QUOTED_STRING_RE.findall(raw)
+    if not quoted_parts:
+        return normalize_wildcard_token(raw)
+
+    if len(quoted_parts) == 1 and raw == f'"{quoted_parts[0]}"':
+        return quoted_parts[0]
+
+    candidate = "*".join(part for part in quoted_parts if part)
+    candidate = normalize_wildcard_token(candidate)
+    if "*" not in candidate and ("+" in raw or "$" in raw or "target_name" in raw or "item." in raw):
+        candidate += "*"
+    return candidate
+
+
 def find_target_block_end(lines, start_index):
     depth = 0
     seen_open_brace = False
@@ -262,6 +318,26 @@ def extract_list_occurrences(block_lines, start_line, variable_names):
     return occurrences
 
 
+def extract_assignment_occurrences(block_lines, start_line, variable_names):
+    variable_names = set(variable_names)
+    occurrences = []
+    for offset, raw_line in enumerate(block_lines):
+        code_part = raw_line.split("#", 1)[0]
+        match = ASSIGNMENT_RE.match(code_part)
+        if not match or match.group("name") not in variable_names:
+            continue
+        raw_value = match.group("value").strip()
+        occurrences.append(
+            {
+                "variable": match.group("name"),
+                "raw": raw_value,
+                "values": QUOTED_STRING_RE.findall(code_part),
+                "line": start_line + offset,
+            }
+        )
+    return occurrences
+
+
 def make_gn_label(dir_rel, target_name):
     if not dir_rel or dir_rel == ".":
         return f"//:{target_name}"
@@ -270,24 +346,32 @@ def make_gn_label(dir_rel, target_name):
 
 def normalize_gn_label(label, build_dir_rel):
     normalized = (label or "").strip()
-    if not normalized or "$" in normalized:
+    if not normalized:
         return ""
 
     normalized = normalized.split("(", 1)[0].strip()
     if normalized.startswith(":"):
-        return make_gn_label(build_dir_rel, normalized[1:])
+        target_name = normalize_wildcard_token(normalized[1:])
+        return make_gn_label(build_dir_rel, target_name) if target_name else ""
 
     if normalized.startswith("//"):
-        return normalized if ":" in normalized else ""
+        if ":" not in normalized:
+            return ""
+        path_part, target_name = normalized.split(":", 1)
+        path_part = normalize_wildcard_token(path_part)
+        target_name = normalize_wildcard_token(target_name)
+        return f"{path_part}:{target_name}" if path_part and target_name else ""
 
     if ":" not in normalized:
         return ""
 
     path_part, target_name = normalized.split(":", 1)
+    path_part = normalize_wildcard_token(path_part)
+    target_name = normalize_wildcard_token(target_name)
     full_dir = os.path.normpath(os.path.join(build_dir_rel or ".", path_part))
     if full_dir == ".":
         full_dir = ""
-    return make_gn_label(full_dir, target_name)
+    return make_gn_label(full_dir, target_name) if target_name else ""
 
 
 def resolve_source_path(base_dir, repo_root, source_value):
@@ -321,6 +405,8 @@ def build_target_summary(entry):
         details.append(f"script={entry['script']}")
     if entry["output_name"]:
         details.append(f"output={entry['output_name']}")
+    if entry.get("artifact_output_names"):
+        details.append(f"artifacts={format_preview_list(entry['artifact_output_names'])}")
     if entry["dep_count"]:
         details.append(f"deps={entry['dep_count']}")
     if entry["sources_count"]:
@@ -368,14 +454,51 @@ def scan_single_build_file(gn_path, scope_root, repo_root):
         )
         graph_deps = extract_list_values(block_text, ["deps", "public_deps", "data_deps"])
         source_occurrences = extract_list_occurrences(block_lines, index + 1, ["sources"])
+        artifact_output_occurrences = extract_list_occurrences(
+            block_lines,
+            index + 1,
+            ARTIFACT_OUTPUT_LIST_NAMES,
+        )
+        artifact_value_occurrences = extract_assignment_occurrences(
+            block_lines,
+            index + 1,
+            ARTIFACT_OUTPUT_VALUE_NAMES,
+        )
+        install_dir_occurrences = extract_assignment_occurrences(
+            block_lines,
+            index + 1,
+            INSTALL_DIR_VALUE_NAMES,
+        )
         sources = [item["value"] for item in source_occurrences]
         for occurrence in source_occurrences:
             occurrence["resolved"] = resolve_source_path(build_dir, repo_root, occurrence["value"])
 
+        name = normalize_target_name_expr(match.group("name_expr"))
+        if not name:
+            index = end_index + 1
+            continue
+
+        artifact_output_names = []
+        for occurrence in artifact_output_occurrences:
+            for value in occurrence.get("values", []):
+                candidate = os.path.basename(value.strip())
+                if candidate:
+                    artifact_output_names.append(candidate)
+        for occurrence in artifact_value_occurrences:
+            raw_values = list(occurrence.get("values") or [])
+            if not raw_values and occurrence.get("raw"):
+                raw_values = [occurrence["raw"]]
+            for value in raw_values:
+                candidate = os.path.basename(value.strip())
+                if candidate:
+                    artifact_output_names.append(candidate)
+        artifact_output_names = sorted(dict.fromkeys(artifact_output_names))
+
         entry = {
-            "name": match.group("name"),
+            "name": name,
+            "name_expr": match.group("name_expr").strip(),
             "type": target_type,
-            "label": make_gn_label(repo_rel_dir, match.group("name")),
+            "label": make_gn_label(repo_rel_dir, name),
             "rel_dir": rel_dir,
             "repo_rel_dir": repo_rel_dir,
             "dir_parts": [] if not rel_dir else rel_dir.split(os.sep),
@@ -387,6 +510,10 @@ def scan_single_build_file(gn_path, scope_root, repo_root):
             "testonly": bool(TESTONLY_RE.search(block_text)),
             "script": extract_first_match(SCRIPT_RE, block_text),
             "output_name": extract_first_match(OUTPUT_NAME_RE, block_text),
+            "artifact_output_occurrences": artifact_output_occurrences,
+            "artifact_value_occurrences": artifact_value_occurrences,
+            "artifact_output_names": artifact_output_names,
+            "install_dir_occurrences": install_dir_occurrences,
             "deps": deps,
             "dep_count": len(deps),
             "graph_deps": [
@@ -966,33 +1093,239 @@ def find_direct_source_targets(entries, file_path):
     return sorted(matches, key=lambda item: item["label"])
 
 
-def collect_reverse_dependents(entries, seed_entries):
-    entry_by_label = {entry["label"]: entry for entry in entries}
-    reverse_deps = defaultdict(set)
-    for entry in entries:
-        for dep in entry.get("graph_deps", []):
-            if dep in entry_by_label:
-                reverse_deps[dep].add(entry["label"])
+def labels_overlap(a, b):
+    if not a or not b:
+        return False
+    return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a)
 
-    queue = deque((entry["label"], 0) for entry in seed_entries)
-    seen = {entry["label"] for entry in seed_entries}
+
+def inferred_match_labels(entry):
+    labels = [entry["label"]]
+    if entry["type"] in {"build_component", "build_component_ng"}:
+        generated_name = f"ace_core_components_{entry['name']}_*"
+        labels.append(make_gn_label(entry["repo_rel_dir"], generated_name))
+    return sorted(dict.fromkeys(label for label in labels if label))
+
+
+def collect_reverse_dependents(entries, seed_entries):
+    queue = deque()
+    seen = set()
     results = []
+    for entry in seed_entries:
+        for label in inferred_match_labels(entry):
+            if label in seen:
+                continue
+            seen.add(label)
+            queue.append((label, 0))
 
     while queue:
         label, distance = queue.popleft()
-        for dependent in sorted(reverse_deps.get(label, [])):
-            if dependent in seen:
+        for entry in entries:
+            entry_label = entry["label"]
+            if entry_label in seen:
                 continue
-            seen.add(dependent)
-            results.append(
-                {
-                    "entry": entry_by_label[dependent],
-                    "distance": distance + 1,
-                }
-            )
-            queue.append((dependent, distance + 1))
+            if not any(labels_overlap(label, dep) for dep in entry.get("graph_deps", [])):
+                continue
+            seen.add(entry_label)
+            results.append({"entry": entry, "distance": distance + 1})
+            for next_label in inferred_match_labels(entry):
+                if next_label in seen:
+                    continue
+                seen.add(next_label)
+                queue.append((next_label, distance + 1))
 
     return results
+
+
+def infer_artifact_name_from_target(entry):
+    target_info = DIRECT_ARTIFACT_TARGET_TYPES.get(entry["type"])
+    if not target_info:
+        return ""
+    artifact_base = entry.get("output_name") or entry.get("name") or ""
+    if not artifact_base or "*" in artifact_base:
+        return ""
+    return target_info["name_pattern"].format(name=artifact_base)
+
+
+def extract_install_dir(entry):
+    for occurrence in entry.get("install_dir_occurrences", []):
+        for value in occurrence.get("values", []):
+            cleaned = value.strip().strip("/")
+            if cleaned:
+                return cleaned
+    return ""
+
+
+def make_artifact_record(name, kind, owner_label, confidence, reason, install_dir="", sort_rank=50):
+    install_path_hint = ""
+    if install_dir and name:
+        install_path_hint = f"{install_dir}/{name}"
+    return {
+        "name": name,
+        "kind": kind,
+        "owner_label": owner_label,
+        "confidence": confidence,
+        "reason": reason,
+        "install_path_hint": install_path_hint,
+        "observed_paths": [],
+        "sort_rank": sort_rank,
+    }
+
+
+def infer_direct_entry_artifacts(entry, confidence, reason):
+    artifacts = []
+    install_dir = extract_install_dir(entry)
+    direct_name = infer_artifact_name_from_target(entry)
+    if direct_name:
+        kind = DIRECT_ARTIFACT_TARGET_TYPES.get(entry["type"], {}).get("kind", entry["type"])
+        artifacts.append(
+            make_artifact_record(direct_name, kind, entry["label"], confidence, reason, install_dir=install_dir)
+        )
+    for output_name in entry.get("artifact_output_names", []):
+        if not output_name:
+            continue
+        artifacts.append(
+            make_artifact_record(
+                output_name,
+                "generated_output",
+                entry["label"],
+                confidence,
+                reason,
+            )
+        )
+    return artifacts
+
+
+def infer_component_fallback_artifacts(resolved_file, repo_root, component_name):
+    rel_path = relpath_from(repo_root, resolved_file).replace("\\", "/")
+    artifacts = []
+    if component_name == "ace_engine" and "/frameworks/core/components_ng/" in rel_path:
+        artifacts.append(
+            make_artifact_record(
+                "libace_compatible.z.so",
+                "shared_library",
+                "//foundation/arkui/ace_engine/build:libace_compatible",
+                "fallback",
+                "Ace NG component templates flow through ace_core_ng/libace_static into libace_compatible.",
+                sort_rank=10,
+            )
+        )
+        artifacts.append(
+            make_artifact_record(
+                "libace.z.so",
+                "shared_library",
+                "//foundation/arkui/ace_engine/build:libace",
+                "fallback",
+                "When libace is enabled, the same Ace NG core sources are also linked into libace.",
+                sort_rank=20,
+            )
+        )
+    return artifacts
+
+
+def find_related_targets_by_stem(entries, resolved_file):
+    stem = os.path.splitext(os.path.basename(resolved_file))[0].lower()
+    if not stem:
+        return []
+
+    scored = []
+    for entry in entries:
+        score = 0
+        if stem in entry.get("name", "").lower():
+            score += 5
+        if stem in (entry.get("output_name") or "").lower():
+            score += 4
+        if any(stem in item.lower() for item in entry.get("artifact_output_names", [])):
+            score += 4
+        if any(stem in os.path.basename(item).lower() for item in entry.get("sources", [])):
+            score += 3
+        if score > 0:
+            scored.append((score, entry["label"], entry))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored]
+
+
+def observe_artifact_paths(repo_root, artifact_name, limit=5):
+    out_root = os.path.join(repo_root, "out")
+    if not artifact_name or not os.path.isdir(out_root):
+        return []
+    matches = []
+    for current_root, dirnames, filenames in os.walk(out_root):
+        dirnames[:] = [name for name in dirnames if name not in SEARCH_SKIP_DIRS]
+        for filename in filenames:
+            if filename != artifact_name:
+                continue
+            matches.append(os.path.join(current_root, filename))
+            if len(matches) >= limit:
+                return matches
+    return matches
+
+
+def collect_file_artifacts(resolved_file, repo_root, component_name, entries, direct_matches, reverse_matches):
+    artifacts = []
+
+    for entry in direct_matches:
+        artifacts.extend(
+            infer_direct_entry_artifacts(
+                entry,
+                confidence="direct",
+                reason="Direct GN target references the resolved source file.",
+            )
+        )
+
+    for item in reverse_matches:
+        entry = item["entry"]
+        if entry["type"] in NON_STANDALONE_TARGET_TYPES:
+            continue
+        artifacts.extend(
+            infer_direct_entry_artifacts(
+                entry,
+                confidence="inferred",
+                reason=f"Reverse dependent of a direct source-owning target (depth {item['distance']}).",
+            )
+        )
+
+    if not artifacts:
+        for entry in find_related_targets_by_stem(entries, resolved_file):
+            artifacts.extend(
+                infer_direct_entry_artifacts(
+                    entry,
+                    confidence="inferred",
+                    reason="Target/artifact name shares the same file stem inside the component scope.",
+                )
+            )
+
+    artifacts.extend(infer_component_fallback_artifacts(resolved_file, repo_root, component_name))
+
+    deduped = []
+    seen = set()
+    for artifact in artifacts:
+        key = (artifact["name"], artifact["owner_label"], artifact["confidence"])
+        if key in seen:
+            continue
+        seen.add(key)
+        artifact["observed_paths"] = observe_artifact_paths(repo_root, artifact["name"])
+        deduped.append(artifact)
+
+    confidence_order = {"direct": 0, "inferred": 1, "fallback": 2}
+    kind_order = {
+        "shared_library": 0,
+        "static_library": 1,
+        "executable": 2,
+        "generated_output": 3,
+        "prebuilt_etc": 4,
+    }
+    deduped.sort(
+        key=lambda item: (
+            confidence_order.get(item["confidence"], 9),
+            int(item.get("sort_rank", 50)),
+            kind_order.get(item["kind"], 9),
+            item["name"],
+            item["owner_label"],
+        )
+    )
+    return deduped
 
 
 def print_file_target_matches(title, matches, include_distance=False):
@@ -1015,6 +1348,28 @@ def print_file_target_matches(title, matches, include_distance=False):
         print(f"    summary      : {entry['summary']}")
         if entry["deps"]:
             print(f"    deps         : {format_preview_list(entry['deps'])}")
+
+
+def print_artifact_matches(artifacts):
+    print(f"\nLikely Output Artifacts [{len(artifacts)}]:")
+    if not artifacts:
+        print("  (none)")
+        print("  The helper could not infer a standalone binary/package output from static GN data.")
+        return
+
+    for artifact in artifacts:
+        print(f"  - {artifact['name']} [{artifact['kind']}]")
+        print(f"    confidence   : {artifact['confidence']}")
+        print(f"    owner target : {artifact['owner_label']}")
+        print(f"    reason       : {artifact['reason']}")
+        if artifact.get("install_path_hint"):
+            print(f"    install hint : {artifact['install_path_hint']}")
+        observed_paths = artifact.get("observed_paths") or []
+        if observed_paths:
+            preview = ", ".join(relpath_from(os.getcwd(), path) for path in observed_paths[:3])
+            if len(observed_paths) > 3:
+                preview += f", ... (+{len(observed_paths) - 3})"
+            print(f"    observed out : {preview}")
 
 
 def print_component_param_hints(component_name, component_data, product_matches):
@@ -1065,6 +1420,14 @@ def show_file_info(file_query, repo_root):
     direct_matches = find_direct_source_targets(entries, resolved_file)
     reverse_matches = collect_reverse_dependents(entries, direct_matches) if direct_matches else []
     product_matches = find_products_for_component(component_name, repo_root) if component_name else []
+    artifacts = collect_file_artifacts(
+        resolved_file,
+        repo_root,
+        component_name,
+        entries,
+        direct_matches,
+        reverse_matches,
+    )
 
     print(f"\n{section_rule()}")
     print("File Build Lookup")
@@ -1095,6 +1458,7 @@ def show_file_info(file_query, repo_root):
         reverse_matches,
         include_distance=True,
     )
+    print_artifact_matches(artifacts)
 
     if bundle_data:
         print_component_param_hints(component_name, bundle_data, product_matches)
@@ -1285,7 +1649,7 @@ Examples:
         help="Show which build targets and params include a specific file",
         description=(
             "Resolve a file path or name, find GN targets that reference it, "
-            "and show related component/product build hints."
+            "show likely output binaries/packages, and print related component/product build hints."
         ),
         epilog="""
 Examples:
