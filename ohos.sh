@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_HELPER="${SCRIPT_DIR}/ohos-helper.py"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 CURL_WRAPPER="${SCRIPT_DIR}/ohos-curl-fallback"
+GITEE_UTIL_RUNNER="${GITEE_UTIL_RUNNER:-${SCRIPT_DIR}/gitee-util-runner.py}"
+GITEE_UTIL_DIR="${GITEE_UTIL_DIR:-${SCRIPT_DIR}/gitee_util}"
+ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
@@ -48,11 +51,16 @@ BUILD_SDK="${BUILD_SDK:---product-name ohos-sdk --ccache}"
 BUILD_SDK_LINUX="${BUILD_SDK_LINUX:---product-name ohos-sdk --gn-args sdk_platform=linux --ccache}"
 BUILD_SDK_WIN="${BUILD_SDK_WIN:---product-name ohos-sdk --gn-args sdk_platform=win --ccache}"
 BUILD_RK3568="${BUILD_RK3568:---product-name rk3568 --ccache}"
+CCACHE_DIR="${CCACHE_DIR:-/data/shared/CCACHE/.ccache}"
+CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-200G}"
 
 REPO_INSTALL_URL="${REPO_INSTALL_URL:-https://gitee.com/oschina/repo/raw/fork_flow/repo-py3}"
 NVM_INSTALL_URL="${NVM_INSTALL_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
 SHARED_PREBUILTS_DIR="${SHARED_PREBUILTS_DIR:-/data/shared/openharmony_prebuilts}"
 PREBUILTS_SYMLINK_NAME="${PREBUILTS_SYMLINK_NAME:-openharmony_prebuilts}"
+
+SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
+FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -96,8 +104,21 @@ run_step() {
     "$@"
 }
 
+is_repo_initialized() {
+    [[ -d ".repo" ]]
+}
+
 is_ohos_repo() {
     [[ -d ".repo" ]] && [[ -f "build/prebuilts_download.sh" ]]
+}
+
+require_repo_initialized() {
+    if ! is_repo_initialized; then
+        err "Current directory has not been initialized."
+        err "Expected .repo/ in $(pwd)"
+        err "Run 'ohos init' first, or cd into an existing OH repo."
+        exit 1
+    fi
 }
 
 require_ohos_repo() {
@@ -107,6 +128,61 @@ require_ohos_repo() {
         err "Run 'ohos init' first, or cd into an existing OH repo."
         exit 1
     fi
+}
+
+require_tool_repo() {
+    local label="$1"
+    local path="$2"
+    if [ ! -d "$path/.git" ]; then
+        err "${label} repository is not available at: $path"
+        err "Expected a nested git clone in this scripts workspace."
+        exit 1
+    fi
+}
+
+python_has_modules() {
+    local python_bin="$1"
+    shift
+    "$python_bin" - "$@" <<'PY'
+import importlib.util
+import sys
+
+missing = [name for name in sys.argv[1:] if importlib.util.find_spec(name) is None]
+sys.exit(0 if not missing else 1)
+PY
+}
+
+install_gitee_util_user_deps() {
+    python3 -m pip install --user \
+        requests \
+        tqdm \
+        prompt_toolkit \
+        beautifulsoup4 \
+        python-dateutil
+}
+
+ensure_gitee_util_runtime() {
+    if python_has_modules python3 requests tqdm prompt_toolkit bs4 dateutil; then
+        GITEE_UTIL_PYTHON="python3"
+        return 0
+    fi
+
+    warn "gitee_util Python dependencies are missing for this shell."
+    warn "Expected modules: requests, tqdm, prompt_toolkit, bs4, dateutil"
+    warn "Recommended install:"
+    warn "  python3 -m pip install --user requests tqdm prompt_toolkit beautifulsoup4 python-dateutil"
+    if confirm_default_yes "Install missing gitee_util Python deps into ~/.local now? [Y/n] "; then
+        run_step "[preflight] install gitee_util Python dependencies" install_gitee_util_user_deps
+        if python_has_modules python3 requests tqdm prompt_toolkit bs4 dateutil; then
+            GITEE_UTIL_PYTHON="python3"
+            return 0
+        fi
+        err "gitee_util dependencies are still unavailable after pip install."
+        exit 1
+    fi
+
+    err "gitee_util dependencies are required for PR commands."
+    exit 1
 }
 
 NPMRC="$HOME/.npmrc"
@@ -379,6 +455,21 @@ ensure_sync_prereqs() {
 ensure_build_prereqs() {
     ensure_node_tooling
     ensure_prebuilts_link
+    configure_ccache
+}
+
+configure_ccache() {
+    export CCACHE_DIR
+    export CCACHE_MAXSIZE
+
+    mkdir -p "$CCACHE_DIR"
+
+    if has_command ccache; then
+        ccache -M "$CCACHE_MAXSIZE" >/dev/null
+        info "ccache ready: dir=$CCACHE_DIR max_size=$CCACHE_MAXSIZE"
+    else
+        warn "ccache binary not found in PATH. build.sh --ccache may not use compiler cache."
+    fi
 }
 
 sync_stage_repo() {
@@ -401,7 +492,7 @@ sync_stage_prebuilts() {
         --trusted-host "$TRUSTED_HOST" \
         --skip-ssl
 
-    restore_npmrc
+    restore_npmrc || true   # failure is already reported inside restore_npmrc; don't abort the chain
     cleanup_proxy_fallback
     trap - EXIT INT TERM
 }
@@ -467,7 +558,7 @@ cmd_init() {
 }
 
 cmd_sync() {
-    require_ohos_repo
+    require_repo_initialized
 
     local run_lfs=true
     local run_prebuilts=true
@@ -670,6 +761,11 @@ cmd_info() {
     python3 "$OHOS_HELPER" info "$@"
 }
 
+cmd_file() {
+    require_ohos_repo
+    python3 "$OHOS_HELPER" file "$@"
+}
+
 cmd_params() {
     python3 "$OHOS_HELPER" params
 }
@@ -731,6 +827,374 @@ cmd_config() {
     echo "  sdk-linux           : $BUILD_SDK_LINUX"
     echo "  sdk-win             : $BUILD_SDK_WIN"
     echo "  rk3568              : $BUILD_RK3568"
+    echo ""
+    echo -e "${BOLD}ccache:${NC}"
+    echo "  cache dir           : $CCACHE_DIR"
+    echo "  max size            : $CCACHE_MAXSIZE"
+    echo ""
+    echo -e "${BOLD}Download roots:${NC}"
+    echo "  sdk                 : $SDK_DOWNLOAD_ROOT"
+    echo "  firmware            : $FIRMWARE_DOWNLOAD_ROOT"
+    echo ""
+    echo -e "${BOLD}Vendored tools:${NC}"
+    echo "  gitee util runner   : $GITEE_UTIL_RUNNER"
+    echo "  gitee util repo     : $GITEE_UTIL_DIR"
+    echo "  xts selector repo   : $ARKUI_XTS_SELECTOR_DIR"
+}
+
+cmd_pr() {
+    require_tool_repo "gitee_util" "$GITEE_UTIL_DIR"
+    if [ ! -f "$GITEE_UTIL_RUNNER" ]; then
+        err "Missing gitee util runner: $GITEE_UTIL_RUNNER"
+        exit 1
+    fi
+
+    local provider_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --provider)
+                [ $# -ge 2 ] || { err "pr: missing value for $1"; exit 1; }
+                provider_args+=("$1" "$2")
+                shift 2
+                ;;
+            --provider=*)
+                provider_args+=("$1")
+                shift
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_pr
+            ;;
+        create-pr|create-issue|create-issue-pr|comment-pr|list-pr|show-comments)
+            ensure_gitee_util_runtime
+            "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@"
+            ;;
+        *)
+            err "pr: unknown subcommand: $subcmd"
+            print_help_pr
+            exit 1
+            ;;
+    esac
+}
+
+run_xts_selector() {
+    require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
+    local xts_extra=()
+    local _gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
+    if [ -f "$_gitcode_cfg" ]; then
+        xts_extra+=(--git-host-config "$_gitcode_cfg")
+    fi
+    PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
+}
+
+run_xts_compare() {
+    require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
+    PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_compare "$@"
+}
+
+# run_xts_download: like run_xts_selector but injects download root config
+run_xts_download() {
+    local extra_args=()
+    if [ -n "${SDK_DOWNLOAD_ROOT:-}" ]; then
+        extra_args+=(--sdk-cache-root "$SDK_DOWNLOAD_ROOT")
+    fi
+    if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
+        extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
+    fi
+    run_xts_selector "${extra_args[@]}" "$@"
+}
+
+has_long_flag() {
+    local wanted="$1"
+    shift || true
+    local arg
+    for arg in "$@"; do
+        if [ "$arg" = "$wanted" ]; then
+            return 0
+        fi
+        case "$arg" in
+            "${wanted}"=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+xts_default_run_store_root() {
+    printf '%s\n' "${ARKUI_XTS_SELECTOR_DIR}/.runs"
+}
+
+xts_is_pr_url() {
+    local value="${1:-}"
+    [[ "$value" =~ ^https?://[^[:space:]]+/(pull|merge_requests)/[0-9]+/?$ ]]
+}
+
+xts_label_fragment() {
+    local raw="${1:-selection}"
+    local normalized
+    normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+    if [ -z "$normalized" ]; then
+        normalized="selection"
+    fi
+    printf '%s\n' "$normalized"
+}
+
+xts_default_run_label() {
+    local user_name
+    user_name="$(id -un 2>/dev/null || printf '%s' "${USER:-user}")"
+    local base="selection"
+    local args=("$@")
+    local index=0
+    while [ $index -lt ${#args[@]} ]; do
+        case "${args[$index]}" in
+            --pr-url|--pr-number)
+                if [ $((index + 1)) -lt ${#args[@]} ]; then
+                    local value="${args[$((index + 1))]}"
+                    if [[ "$value" =~ ([0-9]+) ]]; then
+                        base="mr-${BASH_REMATCH[1]}"
+                    else
+                        base="$value"
+                    fi
+                    break
+                fi
+                ;;
+            --symbol-query)
+                if [ $((index + 1)) -lt ${#args[@]} ]; then
+                    base="symbol-${args[$((index + 1))]}"
+                    break
+                fi
+                ;;
+            --changed-file)
+                if [ $((index + 1)) -lt ${#args[@]} ]; then
+                    base="file-$(basename "${args[$((index + 1))]}")"
+                    break
+                fi
+                ;;
+        esac
+        index=$((index + 1))
+    done
+    printf '%s__%s\n' "$(xts_label_fragment "$user_name")" "$(xts_label_fragment "$base")"
+}
+
+download_tag_flag_for_subcmd() {
+    case "$1" in
+        tests) printf '%s\n' "--daily-build-tag" ;;
+        sdk) printf '%s\n' "--sdk-build-tag" ;;
+        firmware) printf '%s\n' "--firmware-build-tag" ;;
+        *) return 1 ;;
+    esac
+}
+
+download_tag_label_for_subcmd() {
+    case "$1" in
+        tests) printf '%s\n' "daily test suite" ;;
+        sdk) printf '%s\n' "SDK" ;;
+        firmware) printf '%s\n' "firmware" ;;
+        *) return 1 ;;
+    esac
+}
+
+download_has_tag_arg() {
+    local tag_flag="$1"
+    shift
+    local arg
+    for arg in "$@"; do
+        if [ "$arg" = "$tag_flag" ] || [[ "$arg" == "$tag_flag="* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+print_download_tag_hint() {
+    local subcmd="$1"
+    local label
+    label="$(download_tag_label_for_subcmd "$subcmd")" || return 0
+    echo ""
+    info "Choose one of the tags above, then download ${label} with either form:"
+    echo "  ohos download ${subcmd} <tag>"
+    echo "  ohos download ${subcmd} $(download_tag_flag_for_subcmd "$subcmd") <tag>"
+    echo ""
+    info "To inspect more tags or narrow the list:"
+    echo "  ohos download list-tags ${subcmd} --list-tags-count 20"
+    echo "  ohos download list-tags ${subcmd} --list-tags-after 20260401 --list-tags-before 20260430"
+}
+
+cmd_download() {
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_download
+            ;;
+        tests)
+            local tests_args=("$@")
+            local tests_tag_flag="--daily-build-tag"
+            if [ ${#tests_args[@]} -gt 0 ] && [[ "${tests_args[0]}" != -* ]] && ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
+                tests_args=("$tests_tag_flag" "${tests_args[0]}" "${tests_args[@]:1}")
+            fi
+            if ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
+                run_xts_download --list-daily-tags tests "${tests_args[@]}"
+                print_download_tag_hint tests
+                return 0
+            fi
+            run_xts_download --download-daily-tests "${tests_args[@]}"
+            ;;
+        sdk)
+            local sdk_args=("$@")
+            local sdk_tag_flag="--sdk-build-tag"
+            if [ ${#sdk_args[@]} -gt 0 ] && [[ "${sdk_args[0]}" != -* ]] && ! download_has_tag_arg "$sdk_tag_flag" "${sdk_args[@]}"; then
+                sdk_args=("$sdk_tag_flag" "${sdk_args[0]}" "${sdk_args[@]:1}")
+            fi
+            if ! download_has_tag_arg "$sdk_tag_flag" "${sdk_args[@]}"; then
+                run_xts_download --list-daily-tags sdk "${sdk_args[@]}"
+                print_download_tag_hint sdk
+                return 0
+            fi
+            run_xts_download --download-daily-sdk "${sdk_args[@]}"
+            ;;
+        firmware)
+            local firmware_args=("$@")
+            local firmware_tag_flag="--firmware-build-tag"
+            if [ ${#firmware_args[@]} -gt 0 ] && [[ "${firmware_args[0]}" != -* ]] && ! download_has_tag_arg "$firmware_tag_flag" "${firmware_args[@]}"; then
+                firmware_args=("$firmware_tag_flag" "${firmware_args[0]}" "${firmware_args[@]:1}")
+            fi
+            if ! download_has_tag_arg "$firmware_tag_flag" "${firmware_args[@]}"; then
+                run_xts_download --list-daily-tags firmware "${firmware_args[@]}"
+                print_download_tag_hint firmware
+                return 0
+            fi
+            run_xts_download --download-daily-firmware "${firmware_args[@]}"
+            ;;
+        list-tags)
+            local list_type="${1:-tests}"
+            if [ $# -gt 0 ]; then shift; fi
+            run_xts_download --list-daily-tags "$list_type" "$@"
+            ;;
+        *)
+            err "download: unknown subcommand: $subcmd"
+            print_help_download
+            exit 1
+            ;;
+    esac
+}
+
+cmd_xts() {
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_xts
+            ;;
+        select)
+            local select_args=("$@")
+            if [ ${#select_args[@]} -gt 0 ] && [[ "${select_args[0]}" != -* ]] && xts_is_pr_url "${select_args[0]}" \
+                && ! has_long_flag "--pr-url" "${select_args[@]}" && ! has_long_flag "--pr-number" "${select_args[@]}"; then
+                select_args=(--pr-url "${select_args[0]}" "${select_args[@]:1}")
+            fi
+            if ! has_long_flag "--top-projects" "${select_args[@]}"; then
+                select_args+=(--top-projects 0)
+            fi
+            if ! has_long_flag "--run-label" "${select_args[@]}" \
+                && ! has_long_flag "--json" "${select_args[@]}" \
+                && ! has_long_flag "--json-out" "${select_args[@]}"; then
+                select_args+=(--run-label "$(xts_default_run_label "${select_args[@]}")")
+            fi
+            run_xts_selector "${select_args[@]}"
+            ;;
+        run)
+            local run_args=("$@")
+            if [ ${#run_args[@]} -gt 0 ] && [ "${run_args[0]}" = "last" ]; then
+                run_args=("${run_args[@]:1}")
+                if ! has_long_flag "--last-report" "${run_args[@]}" && ! has_long_flag "--from-report" "${run_args[@]}"; then
+                    run_args=(--last-report "${run_args[@]}")
+                fi
+            elif [ ${#run_args[@]} -gt 0 ] && [[ "${run_args[0]}" != -* ]] && [ -f "${run_args[0]}" ] \
+                && ! has_long_flag "--from-report" "${run_args[@]}" && ! has_long_flag "--last-report" "${run_args[@]}"; then
+                run_args=(--from-report "${run_args[0]}" "${run_args[@]:1}")
+            fi
+            run_xts_selector --run-now "${run_args[@]}"
+            ;;
+        compare)
+            local compare_args=("$@")
+            if ! has_long_flag "--base" "${compare_args[@]}" \
+                && ! has_long_flag "--target" "${compare_args[@]}" \
+                && ! has_long_flag "--base-label" "${compare_args[@]}" \
+                && ! has_long_flag "--target-label" "${compare_args[@]}" \
+                && ! has_long_flag "--timeline" "${compare_args[@]}" \
+                && [ ${#compare_args[@]} -ge 2 ] \
+                && [[ "${compare_args[0]}" != -* ]] \
+                && [[ "${compare_args[1]}" != -* ]]; then
+                local base_spec="${compare_args[0]}"
+                local target_spec="${compare_args[1]}"
+                local compare_rest=("${compare_args[@]:2}")
+                local inferred=()
+                local inferred_labels=0
+                if [ -e "$base_spec" ]; then
+                    inferred+=(--base "$base_spec")
+                else
+                    inferred+=(--base-label "$base_spec")
+                    inferred_labels=1
+                fi
+                if [ -e "$target_spec" ]; then
+                    inferred+=(--target "$target_spec")
+                else
+                    inferred+=(--target-label "$target_spec")
+                    inferred_labels=1
+                fi
+                if [ "$inferred_labels" -eq 1 ] && ! has_long_flag "--label-root" "${compare_rest[@]}"; then
+                    inferred+=(--label-root "$(xts_default_run_store_root)")
+                fi
+                compare_args=("${inferred[@]}" "${compare_rest[@]}")
+            fi
+            run_xts_compare "${compare_args[@]}"
+            ;;
+        sdk)
+            run_xts_selector --download-daily-sdk "$@"
+            ;;
+        tests)
+            run_xts_selector --download-daily-tests "$@"
+            ;;
+        firmware)
+            run_xts_selector --download-daily-firmware "$@"
+            ;;
+        flash)
+            local flash_args=()
+            if [ -n "${FLASH_PY_PATH:-}" ] && [ -f "${FLASH_PY_PATH}" ] && ! has_long_flag "--flash-py-path" "$@"; then
+                flash_args+=(--flash-py-path "$FLASH_PY_PATH")
+            fi
+            if [ -n "${HDC_PATH:-}" ] && [ -f "${HDC_PATH}" ] && ! has_long_flag "--hdc-path" "$@"; then
+                flash_args+=(--hdc-path "$HDC_PATH")
+            fi
+            run_xts_selector --flash-daily-firmware "${flash_args[@]}" "$@"
+            ;;
+        --*)
+            run_xts_selector "$subcmd" "$@"
+            ;;
+        *)
+            err "xts: unknown subcommand: $subcmd"
+            print_help_xts
+            exit 1
+            ;;
+    esac
 }
 
 print_help_overview() {
@@ -750,10 +1214,16 @@ Chainable commands:
   gc [options]             Maintenance: lfs prune + git gc
   build [target] [args]    Build a target; chained build should be the final command
 
+Tool commands:
+  download [subcommand]    Download daily SDK / firmware / XTS test packages
+  pr [subcommand]          Wrapper around vendored gitee/gitcode PR helper
+  xts [subcommand]         Wrapper around vendored arkui-xts-selector flows
+
 Info commands:
   products                 List all available products
   parts <product>          List subsystems and components in a product
   info <component>         Show component details; supports helper filters like --deep
+  file <path-or-name>      Show which GN targets and build params include a file
   params                   Quick reference for build.sh flags
   npmrc                    Show the temporary .npmrc used during sync/build
   config                   Show current configuration values
@@ -765,7 +1235,15 @@ Useful examples:
   ohos init --branch weekly_20260330 sync build rk3568
   ohos sync build sdk-linux
   ohos help sync
+  ohos help reset
   ohos info ace_engine --deep --path-filter arkts_frontend --target-filter native
+  ohos file form_link_modifier_test.cpp
+  ohos download list-tags sdk
+  ohos download sdk
+  ohos download sdk 20260404_120537
+  ohos download firmware 20260404_120244
+  ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
+  ohos xts sdk --sdk-build-tag 20260404_120537
 
 Global options:
   --proxy URL              Override proxy for this run
@@ -887,6 +1365,214 @@ Examples:
 HELP
 }
 
+print_help_file() {
+    cat <<HELP
+file - resolve a file and show which build targets and params include it
+
+What it runs:
+  python3 "$OHOS_HELPER" file <path-or-name>
+
+Accepted input:
+  - absolute file path
+  - path relative to the current directory
+  - plain file name
+
+Behavior:
+  - exact paths are preferred when they exist
+  - plain file names are resolved across the repo
+  - if multiple files match, the helper prompts you to choose one
+  - if there is no exact basename match, the helper falls back to basename substring matching
+
+Output includes:
+  - resolved file path
+  - direct GN targets that list the file in sources
+  - reverse dependent targets inside the scanned scope
+  - related component/product build hints when bundle.json metadata is available
+
+Examples:
+  ohos file form_link_modifier_test.cpp
+  ohos file foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  ohos file ./foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  ohos file /home/dmazur/proj/ohos_master/foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  ohos file link_modifier_test.cpp
+HELP
+}
+
+print_help_pr() {
+    cat <<HELP
+pr - wrapper around vendored gitee_util / gitcode PR helper
+
+What it runs:
+  python3 "$GITEE_UTIL_RUNNER" [--provider gitee|gitcode] <subcommand> [args]
+
+Supported subcommands:
+  create-pr
+  create-issue
+  create-issue-pr
+  comment-pr
+  list-pr
+  show-comments
+
+Notes:
+  - The vendored tool repo lives at: $GITEE_UTIL_DIR
+  - Runtime config is stored in:
+      ${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini
+  - To update that tool later:
+      git -C "$GITEE_UTIL_DIR" pull --ff-only
+  - Provider can be selected with --provider gitee or --provider gitcode
+  - On the first real PR command, the wrapper may offer:
+      python3 -m pip install --user requests tqdm prompt_toolkit beautifulsoup4 python-dateutil
+
+Examples:
+  ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
+  ohos pr --provider gitcode create-pr --repo openharmony/arkui_ace_engine --base master
+  ohos pr create-issue-pr --repo openharmony/arkui_ace_engine --type bug --base master
+  ohos pr comment-pr --url https://gitcode.com/owner/repo/pull/123 --comment "Please rerun tests"
+  ohos pr list-pr --repos openharmony/arkui_ace_engine --state open
+HELP
+}
+
+print_help_xts() {
+    cat <<HELP
+xts - wrapper around vendored arkui-xts-selector
+
+What it runs:
+  (cd "$ARKUI_XTS_SELECTOR_DIR" && PYTHONPATH=src python3 -m arkui_xts_selector ...)
+
+Supported subcommands:
+  select     Save a reusable selector report; accepts a raw MR URL as the first arg
+  run        Execute from a saved report (ohos xts run last) or raw selector args
+  compare    Compare two XTS runs by label or by result paths
+  sdk        Convenience wrapper for --download-daily-sdk
+  tests      Convenience wrapper for --download-daily-tests
+  firmware   Convenience wrapper for --download-daily-firmware
+  flash      Convenience wrapper for --flash-daily-firmware
+
+Notes:
+  - The vendored tool repo lives at: $ARKUI_XTS_SELECTOR_DIR
+  - To update that tool later:
+      git -C "$ARKUI_XTS_SELECTOR_DIR" pull --ff-only
+  - You can also skip the wrapper subcommand and pass raw selector flags:
+      ohos xts --pr-url <url>
+  - ohos xts select auto-adds:
+      --top-projects 0
+      --run-label <user__context>
+    unless you override them explicitly.
+  - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
+  - 'ohos xts flash' auto-injects FLASH_PY_PATH / HDC_PATH from $OHOS_CONF
+    when those files exist and you do not override them explicitly.
+
+Recommended flow:
+  1. Pick tests and save a reusable report:
+     ohos xts select https://gitcode.com/openharmony/arkui_ace_engine/merge_requests/83065
+  2. Run the saved plan:
+     ohos xts run last
+  3. If you want explicit compare labels across two runs:
+     ohos xts select https://gitcode.com/.../83065 --run-label mr83065_before
+     ohos xts run last
+     ohos xts select https://gitcode.com/.../83065 --run-label mr83065_after
+     ohos xts run last
+     ohos xts compare mr83065_before mr83065_after
+
+Regression / improvement compare:
+  - Use explicit labels for before/after runs.
+  - ohos xts compare <base-label> <target-label> shows regressions and improvements.
+  - You can also compare raw result paths instead of labels.
+
+Examples:
+  ohos xts select --symbol-query ButtonModifier
+  ohos xts --pr-url https://gitcode.com/openharmony/arkui_ace_engine/pull/82225
+  ohos xts run last
+  ohos xts run /path/to/selector_report.json
+  ohos xts compare baseline fix
+  ohos xts tests --daily-build-tag 20260404_120510
+  ohos xts sdk --sdk-build-tag 20260404_120537
+  ohos xts firmware --firmware-build-tag 20260404_120244
+  ohos xts flash --firmware-build-tag 20260404_120244 --device <serial>
+HELP
+}
+
+print_help_reset() {
+    cat <<HELP
+reset - hard-reset all sub-repos, clean artifacts, and optionally re-sync
+
+What it runs (in order):
+  [1] repo forall -j $RESET_JOBS -c 'git clean -fxd'
+       Remove all untracked and ignored files in every sub-repo.
+  [2] repo forall -j $RESET_JOBS -c 'git reset --hard HEAD'
+       Discard all local modifications in every sub-repo.
+  [3] repo forall -j $GC_JOBS  -c 'git lfs prune'
+       Prune unreachable LFS objects.  (skipped unless RESET_LFS_PRUNE=true)
+  [4] repo forall -j $GC_JOBS  -c 'git gc'
+       Run garbage collection on every sub-repo.  (skipped unless RESET_GC=true)
+  [5] rm -rf $RESET_RM_DIRS
+       Delete the listed directories from the repo root.
+  [6] ohos sync
+       Full sync (repo + lfs + prebuilts).  (skipped with --no-sync)
+
+Configuration (from ${OHOS_CONF}):
+  RESET_JOBS=$RESET_JOBS       parallel jobs for clean/reset
+  GC_JOBS=$GC_JOBS         parallel jobs for lfs prune / git gc
+  RESET_LFS_PRUNE=$RESET_LFS_PRUNE  run 'git lfs prune' during reset
+  RESET_GC=$RESET_GC           run 'git gc' during reset
+  RESET_RM_DIRS="$RESET_RM_DIRS"
+
+Options:
+  --no-sync     skip the final 'ohos sync' step
+
+Examples:
+  ohos reset
+  ohos reset --no-sync
+HELP
+}
+
+print_help_download() {
+    cat <<HELP
+download - download daily prebuilt SDK, firmware or XTS test packages
+
+Subcommands:
+  tests [tag]    Download daily XTS test suite (full package → extracts ACTS)
+  sdk   [tag]    Download daily SDK package
+  firmware [tag] Download daily firmware image package
+  list-tags [tests|sdk|firmware]
+                 List the most recent available build tags (default: tests)
+
+Download roots (configured in ${OHOS_CONF}):
+  SDK      → $SDK_DOWNLOAD_ROOT
+  Firmware → $FIRMWARE_DOWNLOAD_ROOT
+  XTS      → /tmp/arkui_xts_selector_daily_cache  (override with --daily-cache-root)
+
+Behavior:
+  - 'ohos download tests' / 'ohos download sdk' / 'ohos download firmware' without a tag lists recent tags and prints the next command to run.
+  - A plain positional tag is accepted, e.g. 'ohos download firmware 20260404_120244'.
+  - Interrupted downloads are resumed automatically (HTTP Range).
+  - Archive filenames include the build tag for easy identification.
+  - Already-downloaded archives are not re-fetched unless the .part file exists.
+  - 'ohos download' or 'ohos help download' shows all supported artifact types and examples.
+
+Options for tests/sdk/firmware:
+  --daily-build-tag TAG     (or --sdk-build-tag / --firmware-build-tag)
+  --daily-branch BRANCH     default: master
+  --json                    print machine-readable JSON to stdout
+
+Options for list-tags:
+  --list-tags-count N       how many tags to show (default: 10)
+  --list-tags-after DATE    only show tags on/after DATE (YYYYMMDD)
+  --list-tags-before DATE   only show tags on/before DATE (YYYYMMDD)
+  --list-tags-lookback N    days back to search (default: 30)
+
+Examples:
+  ohos download list-tags
+  ohos download list-tags sdk
+  ohos download list-tags firmware --list-tags-count 20
+  ohos download list-tags tests --list-tags-after 20260401
+  ohos download tests 20260404_120510
+  ohos download sdk 20260404_120537
+  ohos download firmware 20260404_120244
+  ohos download firmware --firmware-build-tag 20260404_120244
+HELP
+}
+
 cmd_help() {
     local topic="${1:-}"
     case "$topic" in
@@ -894,8 +1580,13 @@ cmd_help() {
         init) print_help_init ;;
         sync) print_help_sync ;;
         build) print_help_build ;;
+        reset) print_help_reset ;;
         info) print_help_info ;;
-        reset|gc|products|parts|params|npmrc|config|manifest-save)
+        file) print_help_file ;;
+        pr) print_help_pr ;;
+        xts) print_help_xts ;;
+        download) print_help_download ;;
+        gc|products|parts|params|npmrc|config|manifest-save)
             print_help_overview
             ;;
         *)
@@ -921,10 +1612,14 @@ dispatch_single_command() {
         products) cmd_products "$@" ;;
         parts) cmd_parts "$@" ;;
         info) cmd_info "$@" ;;
+        file) cmd_file "$@" ;;
         params) cmd_params "$@" ;;
         npmrc) cmd_npmrc "$@" ;;
         config) cmd_config "$@" ;;
         manifest-save) cmd_manifest_save "$@" ;;
+        pr) cmd_pr "$@" ;;
+        xts) cmd_xts "$@" ;;
+        download) cmd_download "$@" ;;
         *)
             err "Unknown command: $cmd"
             print_help_overview
@@ -973,7 +1668,7 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
-    help|--help|-h|products|parts|info|params|npmrc|config|manifest-save)
+    help|--help|-h|products|parts|info|file|params|npmrc|config|manifest-save|pr|xts|download)
         cmd="$1"
         shift
         dispatch_single_command "$cmd" "$@"

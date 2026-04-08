@@ -1,2 +1,8 @@
 .codex
+.claude/
+.agent-memory/
+.scratchpad/
+coordination/
 __pycache__/
+gitee_util/
+arkui-xts-selector/

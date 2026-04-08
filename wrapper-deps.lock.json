@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "strategy": "nested_git_repos_with_lockfile",
+  "generated_for": "/data/shared/common/scripts",
+  "dependencies": {
+    "gitee_util": {
+      "path": "gitee_util",
+      "local_source_path": "/home/dmazur/proj/gitee_util",
+      "upstream_fetch_url": "https://github.com/uboy/gitee_util.git",
+      "branch": "master",
+      "locked_head": "e7031adb4cacd851a4b5d7dc7ac1bcd57d8da677"
+    },
+    "arkui-xts-selector": {
+      "path": "arkui-xts-selector",
+      "local_source_path": "/home/dmazur/proj/arkui-xts-selector",
+      "upstream_fetch_url": "git@github.com:uboy/xts-selector.git",
+      "upstream_https_url": "https://github.com/uboy/xts-selector.git",
+      "branch": "master",
+      "locked_head": "e14c6dbe7b22f78871749091913393588669ff50"
+    }
+  }
+}

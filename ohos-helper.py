@@ -5,7 +5,7 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 
 COMPONENT_ROOTS = [
     "foundation",
@@ -25,18 +25,51 @@ TESTONLY_RE = re.compile(r"^\s*testonly\s*=\s*true\b", re.MULTILINE)
 SCRIPT_RE = re.compile(r'^\s*script\s*=\s*"([^"]+)"', re.MULTILINE)
 OUTPUT_NAME_RE = re.compile(r'^\s*output_name\s*=\s*"([^"]+)"', re.MULTILINE)
 EXCLUDED_TARGET_TYPES = {"template", "config", "declare_args"}
+SEARCH_SKIP_DIRS = {".git", ".repo", "out", "prebuilts", "__pycache__"}
+LIST_ASSIGN_RE = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:\+?=)\s*\[")
 
 
 def section_rule(char="=", width=68):
     return char * width
 
 
-def find_product_configs():
+def is_ohos_repo_root(path):
+    return os.path.isdir(os.path.join(path, ".repo")) and os.path.isfile(
+        os.path.join(path, "build", "prebuilts_download.sh")
+    )
+
+
+def find_repo_root(start_dir=None):
+    current = os.path.abspath(start_dir or os.getcwd())
+    while True:
+        if is_ohos_repo_root(current):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def is_path_within(path, root):
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+
+def relpath_from(base_path, path):
+    try:
+        return os.path.relpath(path, base_path)
+    except ValueError:
+        return path
+
+
+def find_product_configs(repo_root):
     patterns = ["vendor/*/*/config.json", "productdefine/common/products/*.json"]
     configs = []
     for pattern in patterns:
-        configs.extend(glob.glob(pattern))
-    return configs
+        configs.extend(glob.glob(os.path.join(repo_root, pattern)))
+    return sorted({os.path.normpath(path) for path in configs})
 
 
 def get_product_info(path):
@@ -54,23 +87,27 @@ def get_product_info(path):
     }
 
 
-def list_products():
+def list_products(repo_root):
     print(f"\n{'PRODUCT':<30} | {'CPU':<10} | CONFIG PATH")
     print("-" * 100)
-    for cfg in sorted(find_product_configs()):
+    for cfg in find_product_configs(repo_root):
         info = get_product_info(cfg)
         if info:
-            print(f"{info['name']:<30} | {info['cpu']:<10} | {cfg}")
+            rel_cfg = relpath_from(repo_root, cfg)
+            print(f"{info['name']:<30} | {info['cpu']:<10} | {rel_cfg}")
     print("\nTip: Use the 'PRODUCT' value for ./build.sh --product-name <value>")
 
 
-def list_components(product_name):
-    for cfg in find_product_configs():
+def list_components(product_name, repo_root):
+    for cfg in find_product_configs(repo_root):
         info = get_product_info(cfg)
         if not info or info["name"] != product_name:
             continue
 
-        print(f"\nComponents for product: {product_name} (found in {cfg})")
+        print(
+            f"\nComponents for product: {product_name} "
+            f"(found in {relpath_from(repo_root, cfg)})"
+        )
         print(f"{'SUBSYSTEM':<25} | COMPONENT")
         print("-" * 60)
         subsystems = sorted(info["subsystems"], key=lambda item: item.get("subsystem") or "")
@@ -85,9 +122,9 @@ def list_components(product_name):
     print(f"Product '{product_name}' not found.")
 
 
-def find_bundle_json(component_name):
+def find_bundle_json(component_name, repo_root):
     for root in COMPONENT_ROOTS:
-        pattern = f"{root}/**/{component_name}/bundle.json"
+        pattern = os.path.join(repo_root, root, "**", component_name, "bundle.json")
         for match in glob.glob(pattern, recursive=True):
             try:
                 with open(match, "r", encoding="utf-8") as file_obj:
@@ -97,6 +134,29 @@ def find_bundle_json(component_name):
 
             if data.get("component", {}).get("name") == component_name:
                 return match, data
+    return None, None
+
+
+def find_nearest_bundle_json(file_path, repo_root):
+    current = os.path.dirname(os.path.abspath(file_path))
+    repo_root = os.path.abspath(repo_root)
+
+    while is_path_within(current, repo_root):
+        candidate = os.path.join(current, "bundle.json")
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as file_obj:
+                    data = json.load(file_obj)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                data = None
+            if data and data.get("component", {}).get("name"):
+                return candidate, data
+        if current == repo_root:
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
     return None, None
 
 
@@ -157,6 +217,96 @@ def extract_list_values(block_text, variable_names):
     return values
 
 
+def extract_list_occurrences(block_lines, start_line, variable_names):
+    variable_names = set(variable_names)
+    occurrences = []
+    active_name = None
+    bracket_depth = 0
+
+    for offset, raw_line in enumerate(block_lines):
+        code_part = raw_line.split("#", 1)[0]
+        sanitized = strip_quoted_strings(code_part)
+        match = LIST_ASSIGN_RE.match(code_part)
+
+        if active_name is None and match and match.group("name") in variable_names:
+            active_name = match.group("name")
+            bracket_depth = sanitized.count("[") - sanitized.count("]")
+            for value in QUOTED_STRING_RE.findall(code_part):
+                occurrences.append(
+                    {
+                        "variable": active_name,
+                        "value": value,
+                        "line": start_line + offset,
+                    }
+                )
+            if bracket_depth <= 0:
+                active_name = None
+            continue
+
+        if active_name is None:
+            continue
+
+        for value in QUOTED_STRING_RE.findall(code_part):
+            occurrences.append(
+                {
+                    "variable": active_name,
+                    "value": value,
+                    "line": start_line + offset,
+                }
+            )
+
+        bracket_depth += sanitized.count("[") - sanitized.count("]")
+        if bracket_depth <= 0:
+            active_name = None
+
+    return occurrences
+
+
+def make_gn_label(dir_rel, target_name):
+    if not dir_rel or dir_rel == ".":
+        return f"//:{target_name}"
+    return f"//{dir_rel}:{target_name}"
+
+
+def normalize_gn_label(label, build_dir_rel):
+    normalized = (label or "").strip()
+    if not normalized or "$" in normalized:
+        return ""
+
+    normalized = normalized.split("(", 1)[0].strip()
+    if normalized.startswith(":"):
+        return make_gn_label(build_dir_rel, normalized[1:])
+
+    if normalized.startswith("//"):
+        return normalized if ":" in normalized else ""
+
+    if ":" not in normalized:
+        return ""
+
+    path_part, target_name = normalized.split(":", 1)
+    full_dir = os.path.normpath(os.path.join(build_dir_rel or ".", path_part))
+    if full_dir == ".":
+        full_dir = ""
+    return make_gn_label(full_dir, target_name)
+
+
+def resolve_source_path(base_dir, repo_root, source_value):
+    source_value = (source_value or "").strip()
+    if not source_value or "$" in source_value:
+        return ""
+
+    if source_value.startswith("//"):
+        repo_relative = source_value[2:]
+        if ":" in repo_relative:
+            repo_relative = repo_relative.split(":", 1)[0]
+        return os.path.normpath(os.path.join(repo_root, repo_relative))
+
+    if os.path.isabs(source_value):
+        return os.path.normpath(source_value)
+
+    return os.path.normpath(os.path.join(base_dir, source_value))
+
+
 def build_target_summary(entry):
     if entry["comment"]:
         summary = entry["comment"]
@@ -181,63 +331,101 @@ def build_target_summary(entry):
     return summary
 
 
-def scan_gn_targets(component_dir):
+def scan_single_build_file(gn_path, scope_root, repo_root):
     entries = []
-    pattern = os.path.join(component_dir, "**", "BUILD.gn")
-    for gn_path in glob.glob(pattern, recursive=True):
-        try:
-            with open(gn_path, "r", encoding="utf-8") as file_obj:
-                lines = file_obj.read().splitlines()
-        except (OSError, UnicodeDecodeError):
+    try:
+        with open(gn_path, "r", encoding="utf-8") as file_obj:
+            lines = file_obj.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return entries
+
+    build_dir = os.path.dirname(gn_path)
+    rel_dir = relpath_from(scope_root, build_dir)
+    if rel_dir == ".":
+        rel_dir = ""
+    repo_rel_dir = relpath_from(repo_root, build_dir)
+    if repo_rel_dir == ".":
+        repo_rel_dir = ""
+
+    index = 0
+    while index < len(lines):
+        match = TARGET_DEF_RE.match(lines[index])
+        if not match:
+            index += 1
             continue
 
-        rel_dir = os.path.relpath(os.path.dirname(gn_path), component_dir)
-        if rel_dir == ".":
-            rel_dir = ""
+        target_type = match.group("type")
+        if target_type in EXCLUDED_TARGET_TYPES:
+            index += 1
+            continue
 
-        index = 0
-        while index < len(lines):
-            match = TARGET_DEF_RE.match(lines[index])
-            if not match:
-                index += 1
-                continue
+        end_index = find_target_block_end(lines, index)
+        block_lines = lines[index : end_index + 1]
+        block_text = "\n".join(block_lines)
+        deps = extract_list_values(
+            block_text,
+            ["deps", "public_deps", "external_deps", "data_deps"],
+        )
+        graph_deps = extract_list_values(block_text, ["deps", "public_deps", "data_deps"])
+        source_occurrences = extract_list_occurrences(block_lines, index + 1, ["sources"])
+        sources = [item["value"] for item in source_occurrences]
+        for occurrence in source_occurrences:
+            occurrence["resolved"] = resolve_source_path(build_dir, repo_root, occurrence["value"])
 
-            target_type = match.group("type")
-            if target_type in EXCLUDED_TARGET_TYPES:
-                index += 1
-                continue
+        entry = {
+            "name": match.group("name"),
+            "type": target_type,
+            "label": make_gn_label(repo_rel_dir, match.group("name")),
+            "rel_dir": rel_dir,
+            "repo_rel_dir": repo_rel_dir,
+            "dir_parts": [] if not rel_dir else rel_dir.split(os.sep),
+            "build_file": gn_path,
+            "build_file_rel": relpath_from(scope_root, gn_path),
+            "build_file_repo_rel": relpath_from(repo_root, gn_path),
+            "line": index + 1,
+            "comment": extract_leading_comment(lines, index),
+            "testonly": bool(TESTONLY_RE.search(block_text)),
+            "script": extract_first_match(SCRIPT_RE, block_text),
+            "output_name": extract_first_match(OUTPUT_NAME_RE, block_text),
+            "deps": deps,
+            "dep_count": len(deps),
+            "graph_deps": [
+                normalized
+                for normalized in (
+                    normalize_gn_label(dep, repo_rel_dir) for dep in graph_deps
+                )
+                if normalized
+            ],
+            "sources": sources,
+            "sources_count": len(sources),
+            "source_occurrences": source_occurrences,
+            "resolved_sources": sorted(
+                {
+                    occurrence["resolved"]
+                    for occurrence in source_occurrences
+                    if occurrence["resolved"]
+                }
+            ),
+        }
+        entry["summary"] = build_target_summary(entry)
+        entries.append(entry)
+        index = end_index + 1
 
-            end_index = find_target_block_end(lines, index)
-            block_lines = lines[index : end_index + 1]
-            block_text = "\n".join(block_lines)
-            deps = extract_list_values(
-                block_text,
-                ["deps", "public_deps", "external_deps", "data_deps"],
-            )
-            sources = extract_list_values(block_text, ["sources"])
+    return entries
 
-            entry = {
-                "name": match.group("name"),
-                "type": target_type,
-                "rel_dir": rel_dir,
-                "dir_parts": [] if not rel_dir else rel_dir.split(os.sep),
-                "build_file": gn_path,
-                "build_file_rel": os.path.relpath(gn_path, component_dir),
-                "line": index + 1,
-                "comment": extract_leading_comment(lines, index),
-                "testonly": bool(TESTONLY_RE.search(block_text)),
-                "script": extract_first_match(SCRIPT_RE, block_text),
-                "output_name": extract_first_match(OUTPUT_NAME_RE, block_text),
-                "deps": deps,
-                "dep_count": len(deps),
-                "sources_count": len(sources),
-            }
-            entry["summary"] = build_target_summary(entry)
-            entries.append(entry)
-            index = end_index + 1
 
+def scan_selected_build_files(build_files, scope_root, repo_root):
+    entries = []
+    for gn_path in sorted({os.path.normpath(path) for path in build_files}):
+        entries.extend(scan_single_build_file(gn_path, scope_root, repo_root))
     entries.sort(key=lambda item: (item["rel_dir"], item["name"]))
     return entries
+
+
+def scan_gn_targets(component_dir, repo_root):
+    pattern = os.path.join(component_dir, "**", "BUILD.gn")
+    build_files = glob.glob(pattern, recursive=True)
+    return scan_selected_build_files(build_files, component_dir, repo_root)
 
 
 def filter_target_entries(entries, path_filter=None, target_filter=None, target_type=None):
@@ -495,6 +683,7 @@ def print_build_targets(build):
 
 def print_deep_scan(
     component_dir,
+    repo_root,
     path_filter=None,
     target_filter=None,
     target_type=None,
@@ -503,9 +692,9 @@ def print_deep_scan(
     describe=False,
 ):
     print(f"\n{section_rule()}")
-    print(f"BUILD.gn Targets (deep scan from {component_dir})")
+    print(f"BUILD.gn Targets (deep scan from {relpath_from(repo_root, component_dir)})")
 
-    scanned_entries = scan_gn_targets(component_dir)
+    scanned_entries = scan_gn_targets(component_dir, repo_root)
     if not scanned_entries:
         print("No BUILD.gn targets found.")
         return
@@ -573,8 +762,366 @@ def print_deep_scan(
         print_flat_entries(filtered_entries, describe=describe)
 
 
+def iter_repo_files(repo_root):
+    for current_root, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [name for name in dirnames if name not in SEARCH_SKIP_DIRS]
+        for filename in filenames:
+            yield os.path.join(current_root, filename)
+
+
+def find_repo_file_matches(repo_root, query, mode):
+    repo_root = os.path.abspath(repo_root)
+    normalized_query = os.path.normpath((query or "").replace("\\", os.sep))
+    basename_query = os.path.basename(normalized_query).lower()
+    suffix_query = normalized_query.lower()
+    matches = []
+
+    for path in iter_repo_files(repo_root):
+        rel_path = relpath_from(repo_root, path)
+        rel_lower = rel_path.lower()
+        basename = os.path.basename(path).lower()
+
+        if mode == "basename_exact" and basename == basename_query:
+            matches.append(path)
+        elif mode == "basename_contains" and basename_query in basename:
+            matches.append(path)
+        elif mode == "suffix":
+            if rel_lower == suffix_query or rel_lower.endswith(os.sep + suffix_query):
+                matches.append(path)
+
+    return sorted({os.path.normpath(path) for path in matches})
+
+
+def find_repo_basename_candidates(repo_root, query):
+    repo_root = os.path.abspath(repo_root)
+    basename_query = os.path.basename((query or "").strip()).lower()
+    exact_matches = []
+    substring_matches = []
+
+    for path in iter_repo_files(repo_root):
+        basename = os.path.basename(path).lower()
+        if basename == basename_query:
+            exact_matches.append(path)
+        elif basename_query in basename:
+            substring_matches.append(path)
+
+    return (
+        sorted({os.path.normpath(path) for path in exact_matches}),
+        sorted({os.path.normpath(path) for path in substring_matches}),
+    )
+
+
+def choose_file_candidate(query, candidates, repo_root, match_mode):
+    if not candidates:
+        return None, ""
+    if len(candidates) == 1:
+        return candidates[0], match_mode
+
+    print(f"\nMultiple files matched '{query}' ({match_mode}):")
+    for index, path in enumerate(candidates, 1):
+        print(f"  {index}. {relpath_from(repo_root, path)}")
+
+    if not sys.stdin.isatty():
+        print("\nPlease rerun the command with one of the full paths above.")
+        return None, ""
+
+    while True:
+        try:
+            answer = input("Select file number (Enter to cancel): ").strip()
+        except EOFError:
+            return None, ""
+        if not answer:
+            return None, ""
+        if answer.isdigit():
+            selected_index = int(answer)
+            if 1 <= selected_index <= len(candidates):
+                return candidates[selected_index - 1], f"{match_mode} (selected)"
+        print("Enter a valid number or press Enter to cancel.")
+
+
+def resolve_file_query(query, repo_root, current_dir=None):
+    repo_root = os.path.abspath(repo_root)
+    current_dir = os.path.abspath(current_dir or os.getcwd())
+    query = (query or "").strip()
+    if not query:
+        return None, "Empty file query."
+
+    normalized_query = query.replace("\\", os.sep)
+    path_like = os.path.isabs(normalized_query) or normalized_query.startswith(".") or os.sep in normalized_query
+    direct_candidates = []
+
+    if os.path.isabs(normalized_query):
+        direct_candidates.append((os.path.abspath(normalized_query), "absolute path"))
+    else:
+        direct_candidates.append(
+            (
+                os.path.abspath(os.path.join(current_dir, normalized_query)),
+                "path relative to current directory",
+            )
+        )
+        if path_like:
+            direct_candidates.append(
+                (
+                    os.path.abspath(os.path.join(repo_root, normalized_query)),
+                    "path relative to repo root",
+                )
+            )
+
+    seen_candidates = set()
+    for candidate, match_mode in direct_candidates:
+        candidate = os.path.normpath(candidate)
+        if candidate in seen_candidates:
+            continue
+        seen_candidates.add(candidate)
+        if os.path.isfile(candidate):
+            if not is_path_within(candidate, repo_root):
+                return None, f"Resolved path is outside the current OpenHarmony repo: {candidate}"
+            return candidate, match_mode
+
+    if path_like:
+        suffix_matches = find_repo_file_matches(repo_root, normalized_query, "suffix")
+        selected, match_mode = choose_file_candidate(query, suffix_matches, repo_root, "repo suffix match")
+        if selected:
+            return selected, match_mode
+        if suffix_matches:
+            return None, "File selection cancelled."
+        return None, f"File not found: {query}"
+
+    exact_matches, substring_matches = find_repo_basename_candidates(repo_root, normalized_query)
+    selected, match_mode = choose_file_candidate(query, exact_matches, repo_root, "exact basename")
+    if selected:
+        return selected, match_mode
+    if exact_matches:
+        return None, "File selection cancelled."
+
+    selected, match_mode = choose_file_candidate(
+        query,
+        substring_matches,
+        repo_root,
+        "basename substring",
+    )
+    if selected:
+        return selected, match_mode
+    if substring_matches:
+        return None, "File selection cancelled."
+
+    return None, f"No files matched: {query}"
+
+
+def collect_ancestor_build_files(file_path, repo_root):
+    repo_root = os.path.abspath(repo_root)
+    current = os.path.dirname(os.path.abspath(file_path))
+    build_files = []
+
+    while is_path_within(current, repo_root):
+        candidate = os.path.join(current, "BUILD.gn")
+        if os.path.isfile(candidate):
+            build_files.append(candidate)
+        if current == repo_root:
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    return build_files
+
+
+def find_products_for_component(component_name, repo_root):
+    matches = []
+    for cfg in find_product_configs(repo_root):
+        info = get_product_info(cfg)
+        if not info:
+            continue
+        found = False
+        for subsystem in info["subsystems"]:
+            for component in subsystem.get("components", []):
+                if (component.get("component") or "") == component_name:
+                    matches.append(
+                        {
+                            "name": info["name"],
+                            "path": cfg,
+                        }
+                    )
+                    found = True
+                    break
+            if found:
+                break
+    return sorted(matches, key=lambda item: item["name"])
+
+
+def find_direct_source_targets(entries, file_path):
+    file_path = os.path.normpath(file_path)
+    matches = []
+    for entry in entries:
+        source_matches = [
+            occurrence
+            for occurrence in entry.get("source_occurrences", [])
+            if occurrence.get("resolved") == file_path
+        ]
+        if source_matches:
+            enriched = dict(entry)
+            enriched["source_matches"] = source_matches
+            matches.append(enriched)
+    return sorted(matches, key=lambda item: item["label"])
+
+
+def collect_reverse_dependents(entries, seed_entries):
+    entry_by_label = {entry["label"]: entry for entry in entries}
+    reverse_deps = defaultdict(set)
+    for entry in entries:
+        for dep in entry.get("graph_deps", []):
+            if dep in entry_by_label:
+                reverse_deps[dep].add(entry["label"])
+
+    queue = deque((entry["label"], 0) for entry in seed_entries)
+    seen = {entry["label"] for entry in seed_entries}
+    results = []
+
+    while queue:
+        label, distance = queue.popleft()
+        for dependent in sorted(reverse_deps.get(label, [])):
+            if dependent in seen:
+                continue
+            seen.add(dependent)
+            results.append(
+                {
+                    "entry": entry_by_label[dependent],
+                    "distance": distance + 1,
+                }
+            )
+            queue.append((dependent, distance + 1))
+
+    return results
+
+
+def print_file_target_matches(title, matches, include_distance=False):
+    print(f"\n{title} [{len(matches)}]:")
+    if not matches:
+        print("  (none)")
+        return
+
+    for item in matches:
+        entry = item["entry"] if include_distance else item
+        print(f"  - {entry['label']} [{entry['type']}]")
+        print(f"    build file   : {entry['build_file_repo_rel']}:{entry['line']}")
+        if include_distance:
+            print(f"    reverse depth: {item['distance']}")
+        if entry.get("source_matches"):
+            line_list = ", ".join(str(match["line"]) for match in entry["source_matches"])
+            value_list = ", ".join(sorted({match["value"] for match in entry["source_matches"]}))
+            print(f"    source lines : {line_list}")
+            print(f"    source value : {value_list}")
+        print(f"    summary      : {entry['summary']}")
+        if entry["deps"]:
+            print(f"    deps         : {format_preview_list(entry['deps'])}")
+
+
+def print_component_param_hints(component_name, component_data, product_matches):
+    component = component_data.get("component", {})
+    build = component.get("build", {}) or {}
+    features = sorted(component.get("features", []))
+    product_names = [item["name"] for item in product_matches]
+
+    print("\nRelevant Build Parameters:")
+    if product_names:
+        print(f"  --product-name : {', '.join(product_names)}")
+    else:
+        print("  --product-name : no matching product config found")
+    print(f"  --build-target : {component_name}")
+    if features:
+        print(f"  --gn-args      : {', '.join(features)}")
+    else:
+        print("  --gn-args      : no component feature flags declared")
+
+    test_targets = build.get("test", [])
+    if test_targets:
+        print("\nComponent Test Targets:")
+        for target in test_targets:
+            print(f"  - {target}")
+
+
+def show_file_info(file_query, repo_root):
+    resolved_file, match_mode = resolve_file_query(file_query, repo_root, os.getcwd())
+    if not resolved_file:
+        print(f"Error: {match_mode}")
+        return 1
+
+    bundle_path, bundle_data = find_nearest_bundle_json(resolved_file, repo_root)
+    if bundle_data:
+        component = bundle_data.get("component", {})
+        component_name = component.get("name") or ""
+        component_dir = os.path.dirname(bundle_path)
+        entries = scan_gn_targets(component_dir, repo_root)
+        scope_label = relpath_from(repo_root, component_dir)
+    else:
+        component = {}
+        component_name = ""
+        component_dir = None
+        build_files = collect_ancestor_build_files(resolved_file, repo_root)
+        entries = scan_selected_build_files(build_files, repo_root, repo_root)
+        scope_label = "ancestor BUILD.gn files"
+
+    direct_matches = find_direct_source_targets(entries, resolved_file)
+    reverse_matches = collect_reverse_dependents(entries, direct_matches) if direct_matches else []
+    product_matches = find_products_for_component(component_name, repo_root) if component_name else []
+
+    print(f"\n{section_rule()}")
+    print("File Build Lookup")
+    print(f"Query:      {file_query}")
+    print(f"Resolved:   {relpath_from(repo_root, resolved_file)}")
+    print(f"Match mode: {match_mode}")
+    print(section_rule())
+
+    if bundle_data:
+        print("\nComponent Context:")
+        print(f"  Component : {component_name}")
+        print(f"  Subsystem : {component.get('subsystem') or '-'}")
+        print(f"  Bundle    : {relpath_from(repo_root, bundle_path)}")
+        print(f"  Scan scope: {scope_label}")
+    else:
+        print("\nComponent Context:")
+        print("  No enclosing bundle.json was found for this file.")
+        print(f"  Scan scope: {scope_label}")
+
+    if product_matches:
+        print(f"\nProducts containing component [{len(product_matches)}]:")
+        for item in product_matches:
+            print(f"  - {item['name']} ({relpath_from(repo_root, item['path'])})")
+
+    print_file_target_matches("Direct GN targets referencing this file", direct_matches)
+    print_file_target_matches(
+        "Reverse dependent targets in scanned scope",
+        reverse_matches,
+        include_distance=True,
+    )
+
+    if bundle_data:
+        print_component_param_hints(component_name, bundle_data, product_matches)
+
+        print(f"\n{section_rule()}")
+        print("Examples:")
+        sample_product = product_matches[0]["name"] if product_matches else "rk3568"
+        print(f"  Query file:       ohos file {os.path.basename(resolved_file)}")
+        print(f"  Build component:  ./build.sh --product-name {sample_product} --build-target {component_name}")
+        features = sorted(bundle_data.get('component', {}).get('features', []))
+        if features:
+            print(
+                f"  With feature:     ./build.sh --product-name {sample_product} "
+                f"--gn-args {features[0]}=true"
+            )
+
+    if not direct_matches:
+        print("\nNo direct static source references were found in the scanned BUILD.gn scope.")
+        if component_dir:
+            print("The file may be included through generated lists, templates, or non-component build files.")
+
+    return 0
+
+
 def show_component_info(
     component_name,
+    repo_root,
     deep=False,
     path_filter=None,
     target_filter=None,
@@ -583,7 +1130,7 @@ def show_component_info(
     max_depth=None,
     describe=False,
 ):
-    path, data = find_bundle_json(component_name)
+    path, data = find_bundle_json(component_name, repo_root)
     if not data:
         print(f"Error: Component '{component_name}' metadata (bundle.json) not found.")
         return 1
@@ -593,7 +1140,7 @@ def show_component_info(
 
     print(f"\n{section_rule()}")
     print(f"Component:  {component_name}")
-    print(f"Path:       {path}")
+    print(f"Path:       {relpath_from(repo_root, path)}")
     print(f"Subsystem:  {component.get('subsystem')}")
     print(section_rule())
 
@@ -611,6 +1158,7 @@ def show_component_info(
     if deep:
         print_deep_scan(
             component_dir,
+            repo_root,
             path_filter=path_filter,
             target_filter=target_filter,
             target_type=target_type,
@@ -649,18 +1197,19 @@ def show_common_params():
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="OpenHarmony Build Helper - find products, parts, and build targets",
+        description="OpenHarmony Build Helper - find products, parts, files, and build targets",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 General workflow:
   1. Find your product:       python3 ohos-helper.py products
   2. See what parts it has:   python3 ohos-helper.py parts rk3568
   3. Inspect one component:   python3 ohos-helper.py info ace_engine
-  4. Deep-scan BUILD.gn:      python3 ohos-helper.py info ace_engine --deep
-  5. Filter deep results:     python3 ohos-helper.py info ace_engine --deep --path-filter arkts_frontend --target-filter native
-  6. Browse as tree:          python3 ohos-helper.py info ace_engine --deep --view tree --max-depth 2 | less -R
-  7. Describe one target:     python3 ohos-helper.py info ace_engine --deep --target-filter linux_unittest --describe
-  8. Run build:               ./build.sh --product-name rk3568 --build-target ace_engine
+  4. Inspect one file:        python3 ohos-helper.py file form_link_modifier_test.cpp
+  5. Deep-scan BUILD.gn:      python3 ohos-helper.py info ace_engine --deep
+  6. Filter deep results:     python3 ohos-helper.py info ace_engine --deep --path-filter arkts_frontend --target-filter native
+  7. Browse as tree:          python3 ohos-helper.py info ace_engine --deep --view tree --max-depth 2 | less -R
+  8. Describe one target:     python3 ohos-helper.py info ace_engine --deep --target-filter linux_unittest --describe
+  9. Run build:               ./build.sh --product-name rk3568 --build-target ace_engine
 """,
     )
 
@@ -731,6 +1280,28 @@ Examples:
         help="Show file, line, type, deps, and heuristic target meaning in deep output",
     )
 
+    file_parser = subparsers.add_parser(
+        "file",
+        help="Show which build targets and params include a specific file",
+        description=(
+            "Resolve a file path or name, find GN targets that reference it, "
+            "and show related component/product build hints."
+        ),
+        epilog="""
+Examples:
+  python3 ohos-helper.py file form_link_modifier_test.cpp
+  python3 ohos-helper.py file foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  python3 ohos-helper.py file ./foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  python3 ohos-helper.py file /home/dmazur/proj/ohos_master/foundation/arkui/ace_engine/test/unittest/capi/modifiers/form_link_modifier_test.cpp
+  python3 ohos-helper.py file link_modifier_test.cpp
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    file_parser.add_argument(
+        "file_query",
+        help="Absolute path, path relative to the current directory, or a file name to resolve",
+    )
+
     subparsers.add_parser(
         "params",
         help="Quick reference for build.sh flags",
@@ -747,13 +1318,22 @@ def main():
         return 1
 
     args = parser.parse_args()
+    repo_root = None
+
+    if args.command in {"products", "parts", "info", "file"}:
+        repo_root = find_repo_root()
+        if not repo_root:
+            parser.error(
+                "current directory is not inside an OpenHarmony repository "
+                "(expected .repo/ and build/prebuilts_download.sh in an ancestor directory)"
+            )
 
     if args.command == "products":
-        list_products()
+        list_products(repo_root)
         return 0
 
     if args.command == "parts":
-        list_components(args.product)
+        list_components(args.product, repo_root)
         return 0
 
     if args.command == "info":
@@ -775,6 +1355,7 @@ def main():
             parser.error("--max-depth must be >= 1")
         return show_component_info(
             args.component,
+            repo_root,
             deep=args.deep,
             path_filter=args.path_filter,
             target_filter=args.target_filter,
@@ -783,6 +1364,9 @@ def main():
             max_depth=args.max_depth,
             describe=args.describe,
         )
+
+    if args.command == "file":
+        return show_file_info(args.file_query, repo_root)
 
     if args.command == "params":
         show_common_params()
