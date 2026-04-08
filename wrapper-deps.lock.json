@@ -16,7 +16,7 @@
       "upstream_fetch_url": "git@github.com:uboy/xts-selector.git",
       "upstream_https_url": "https://github.com/uboy/xts-selector.git",
       "branch": "master",
-      "locked_head": "e14c6dbe7b22f78871749091913393588669ff50"
+      "locked_head": "5d430db3c32d7bae79cb6a2d774ec824a3999ffb"
     }
   }
 }
