@@ -23,6 +23,7 @@ CURL_WRAPPER="${SCRIPT_DIR}/ohos-curl-fallback"
 GITEE_UTIL_RUNNER="${GITEE_UTIL_RUNNER:-${SCRIPT_DIR}/gitee-util-runner.py}"
 GITEE_UTIL_DIR="${GITEE_UTIL_DIR:-${SCRIPT_DIR}/gitee_util}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
+OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
@@ -47,6 +48,7 @@ OHOS_NO_PROXY="${OHOS_NO_PROXY:-tsnnlx12bs02.ad.telmast.com,localhost,127.0.0.1}
 REPO_SYNC_JOBS="${REPO_SYNC_JOBS:-8}"
 LFS_JOBS="${LFS_JOBS:-64}"
 RESET_JOBS="${RESET_JOBS:-64}"
+SYNC_FORCE_MAX_RETRIES="${SYNC_FORCE_MAX_RETRIES:-5}"
 
 RESET_LFS_PRUNE="${RESET_LFS_PRUNE:-false}"
 RESET_GC="${RESET_GC:-false}"
@@ -73,6 +75,8 @@ PREBUILTS_SYMLINK_NAME="${PREBUILTS_SYMLINK_NAME:-openharmony_prebuilts}"
 
 SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
 FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
+XTS_HDC_ENDPOINT="${XTS_HDC_ENDPOINT:-}"
+XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -80,6 +84,9 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
+
+SYNC_FORCE_ENABLED=false
+LAST_STEP_LOG=""
 
 info()  { echo -e "${GREEN}[ohos]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[ohos]${NC} $*"; }
@@ -111,9 +118,22 @@ confirm_default_no() {
 
 run_step() {
     local label="$1"
+    local rc
     shift
+
+    LAST_STEP_LOG=""
     info "======== ${label} ========"
-    "$@"
+    if "$@"; then
+        return 0
+    else
+        rc=$?
+    fi
+
+    err "Stage failed: ${label}"
+    if [ -n "$LAST_STEP_LOG" ]; then
+        err "Stage log: $LAST_STEP_LOG"
+    fi
+    return "$rc"
 }
 
 is_repo_initialized() {
@@ -414,6 +434,141 @@ prebuilts_link_path() {
     printf '%s/%s\n' "$(current_repo_parent_dir)" "$PREBUILTS_SYMLINK_NAME"
 }
 
+make_timestamped_backup_path() {
+    local path="$1"
+    local stamp
+    local candidate
+    local suffix=1
+
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    candidate="${path}.bak.${stamp}"
+    while [ -e "$candidate" ] || [ -L "$candidate" ]; do
+        candidate="${path}.bak.${stamp}.${suffix}"
+        suffix=$((suffix + 1))
+    done
+    printf '%s\n' "$candidate"
+}
+
+backup_existing_path() {
+    local path="$1"
+    local backup_path
+
+    backup_path="$(make_timestamped_backup_path "$path")"
+    if ! mv "$path" "$backup_path"; then
+        err "Failed to move existing path out of the way: $path"
+        exit 1
+    fi
+    info "Existing path backed up: $path -> $backup_path"
+}
+
+run_logged_command() {
+    local log_path="$1"
+    local rc
+    shift
+
+    "$@" 2>&1 | tee "$log_path"
+    rc=${PIPESTATUS[0]}
+    return "$rc"
+}
+
+run_repo_sync_logged() {
+    local log_path="$1"
+    local jobs="$2"
+    local fail_fast="$3"
+    shift 3
+    local -a cmd=(repo sync -j "$jobs" --optimized-fetch --current-branch --retry-fetches=5)
+
+    if [ "$fail_fast" = "true" ]; then
+        cmd+=(--fail-fast)
+    fi
+    if [ "$SYNC_FORCE_ENABLED" = "true" ]; then
+        cmd+=(--force-sync)
+    fi
+    if [ $# -gt 0 ]; then
+        cmd+=("$@")
+    fi
+
+    run_logged_command "$log_path" "${cmd[@]}"
+}
+
+collect_repo_sync_failures() {
+    local log_path="$1"
+    local line
+    local path
+    local capture=0
+    local -a ordered_paths=()
+    local -A seen=()
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$capture" -eq 1 ]; then
+            case "$line" in
+                "Try re-running"*)
+                    capture=0
+                    ;;
+                error:*)
+                    capture=0
+                    ;;
+                *)
+                    path="${line#"${line%%[![:space:]]*}"}"
+                    path="${path%%[[:space:]]*}"
+                    path="${path%/}"
+                    if [ -n "$path" ] && [ -z "${seen[$path]+x}" ]; then
+                        ordered_paths+=("$path")
+                        seen["$path"]=1
+                    fi
+                    continue
+                    ;;
+            esac
+        fi
+
+        case "$line" in
+            "Failing repos:")
+                capture=1
+                continue
+                ;;
+        esac
+
+        if [[ "$line" =~ ^error:\ ([^:]+)\/:\  ]]; then
+            path="${BASH_REMATCH[1]}"
+            if [ -n "$path" ] && [ -z "${seen[$path]+x}" ]; then
+                ordered_paths+=("$path")
+                seen["$path"]=1
+            fi
+        fi
+    done < "$log_path"
+
+    if [ ${#ordered_paths[@]} -gt 0 ]; then
+        printf '%s\n' "${ordered_paths[@]}"
+    fi
+}
+
+force_clean_repo_path() {
+    local repo_path="$1"
+
+    if [ ! -d "$repo_path" ]; then
+        err "Failing repo path not found: $repo_path"
+        return 1
+    fi
+    if ! git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1; then
+        err "Failing repo path is not a git checkout: $repo_path"
+        return 1
+    fi
+
+    info "Force-cleaning repo worktree: $repo_path"
+    git -C "$repo_path" rebase --abort >/dev/null 2>&1 || true
+    git -C "$repo_path" merge --abort >/dev/null 2>&1 || true
+    git -C "$repo_path" am --abort >/dev/null 2>&1 || true
+    git -C "$repo_path" reset --hard HEAD
+    git -C "$repo_path" clean -ffdx
+}
+
+force_clean_repo_paths() {
+    local repo_path
+    for repo_path in "$@"; do
+        force_clean_repo_path "$repo_path"
+    done
+}
+
 ensure_prebuilts_link() {
     local link_path
     local actual_target
@@ -433,7 +588,11 @@ ensure_prebuilts_link() {
 
         warn "Sibling prebuilts link points elsewhere:"
         warn "  $link_path -> ${actual_target:-unknown}"
-        if confirm_default_no "Replace it with $SHARED_PREBUILTS_DIR? [y/N] "; then
+        if [ "$SYNC_FORCE_ENABLED" = "true" ]; then
+            backup_existing_path "$link_path"
+            ln -s "$SHARED_PREBUILTS_DIR" "$link_path"
+            info "Sibling prebuilts link replaced in force mode: $link_path -> $SHARED_PREBUILTS_DIR"
+        elif confirm_default_no "Replace it with $SHARED_PREBUILTS_DIR? [y/N] "; then
             rm -f "$link_path"
             ln -s "$SHARED_PREBUILTS_DIR" "$link_path"
             info "Sibling prebuilts link updated: $link_path -> $SHARED_PREBUILTS_DIR"
@@ -445,10 +604,14 @@ ensure_prebuilts_link() {
     fi
 
     if [ -e "$link_path" ]; then
-        err "Expected sibling prebuilts link path already exists and is not a symlink:"
-        err "  $link_path"
-        err "Move it away or replace it manually, then rerun the command."
-        exit 1
+        if [ "$SYNC_FORCE_ENABLED" = "true" ]; then
+            backup_existing_path "$link_path"
+        else
+            err "Expected sibling prebuilts link path already exists and is not a symlink:"
+            err "  $link_path"
+            err "Move it away or replace it manually, then rerun the command."
+            exit 1
+        fi
     fi
 
     ln -s "$SHARED_PREBUILTS_DIR" "$link_path"
@@ -485,28 +648,85 @@ configure_ccache() {
 }
 
 sync_stage_repo() {
-    repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch --retry-fetches=5
+    local rc
+    local attempt=1
+    local jobs="$REPO_SYNC_JOBS"
+    local fail_fast=false
+    local -a target_paths=()
+    local -a parsed_paths=()
+
+    while true; do
+        LAST_STEP_LOG="$(mktemp /tmp/ohos_repo_sync_XXXXXX.log)"
+        if run_repo_sync_logged "$LAST_STEP_LOG" "$jobs" "$fail_fast" "${target_paths[@]}"; then
+            if [ ${#target_paths[@]} -gt 0 ]; then
+                info "repo sync recovery succeeded for the failing repos."
+            fi
+            return 0
+        fi
+
+        rc=$?
+        if [ "$SYNC_FORCE_ENABLED" != "true" ]; then
+            return "$rc"
+        fi
+
+        mapfile -t parsed_paths < <(collect_repo_sync_failures "$LAST_STEP_LOG")
+        if [ ${#parsed_paths[@]} -eq 0 ]; then
+            err "repo sync failed in force mode, but failing repos could not be identified automatically."
+            return "$rc"
+        fi
+
+        err "repo sync failed. Force mode will discard local changes in the failing repos and retry:"
+        printf '%s\n' "${parsed_paths[@]}" | sed 's/^/[ohos]   /' >&2
+        force_clean_repo_paths "${parsed_paths[@]}"
+
+        target_paths=("${parsed_paths[@]}")
+        jobs=1
+        fail_fast=true
+        attempt=$((attempt + 1))
+        if [ "$attempt" -gt "$SYNC_FORCE_MAX_RETRIES" ]; then
+            err "repo sync force retry limit reached (${SYNC_FORCE_MAX_RETRIES})."
+            return "$rc"
+        fi
+    done
 }
 
 sync_stage_lfs() {
-    repo forall -j "$LFS_JOBS" -c \
-        "git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"
+    local rc
+
+    LAST_STEP_LOG="$(mktemp /tmp/ohos_lfs_sync_XXXXXX.log)"
+    if run_logged_command "$LAST_STEP_LOG" \
+        repo forall -j "$LFS_JOBS" -c \
+        "git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"; then
+        return 0
+    fi
+
+    rc=$?
+    return "$rc"
 }
 
 sync_stage_prebuilts() {
+    local rc
+
     protect_npmrc
     trap 'restore_npmrc; cleanup_proxy_fallback' EXIT INT TERM
     setup_proxy_fallback
 
-    bash build/prebuilts_download.sh \
+    LAST_STEP_LOG="$(mktemp /tmp/ohos_prebuilts_XXXXXX.log)"
+    if run_logged_command "$LAST_STEP_LOG" \
+        bash build/prebuilts_download.sh \
         --npm-registry "$NPM_REGISTRY" \
         --pypi-url "$PYPI_URL" \
         --trusted-host "$TRUSTED_HOST" \
-        --skip-ssl
+        --skip-ssl; then
+        rc=0
+    else
+        rc=$?
+    fi
 
     restore_npmrc || true   # failure is already reported inside restore_npmrc; don't abort the chain
     cleanup_proxy_fallback
     trap - EXIT INT TERM
+    return "$rc"
 }
 
 cmd_init() {
@@ -575,8 +795,11 @@ cmd_sync() {
     local run_lfs=true
     local run_prebuilts=true
 
+    SYNC_FORCE_ENABLED=false
+
     while [ $# -gt 0 ]; do
         case "$1" in
+            -f|--force) SYNC_FORCE_ENABLED=true ;;
             --skip-lfs) run_lfs=false ;;
             --skip-prebuilts) run_prebuilts=false ;;
             --repo-only)
@@ -933,12 +1156,22 @@ run_xts_selector() {
     if [ -f "$_gitcode_cfg" ]; then
         xts_extra+=(--git-host-config "$_gitcode_cfg")
     fi
+    if [ -n "${HDC_PATH:-}" ] && [ -f "${HDC_PATH}" ]; then
+        xts_extra+=(--hdc-path "$HDC_PATH")
+    fi
+    if [ -n "${XTS_HDC_ENDPOINT:-}" ]; then
+        xts_extra+=(--hdc-endpoint "$XTS_HDC_ENDPOINT")
+    fi
     PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
 }
 
 run_xts_compare() {
     require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
     PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_compare "$@"
+}
+
+run_xts_bridge_tool() {
+    python3 "$OHOS_XTS_BRIDGE_TOOL" "$@"
 }
 
 # run_xts_download: like run_xts_selector but injects download root config
@@ -1224,6 +1457,32 @@ cmd_xts() {
             fi
             run_xts_selector --flash-daily-firmware "${flash_args[@]}" "$@"
             ;;
+        bridge)
+            local bridge_subcmd="${1:-help}"
+            if [ $# -gt 0 ]; then
+                shift
+            fi
+            case "$bridge_subcmd" in
+                help|--help|-h|"")
+                    print_help_xts_bridge
+                    ;;
+                package-windows)
+                    local bridge_args=("$@")
+                    if ! has_long_flag "--output" "${bridge_args[@]}" && ! has_long_flag "--output-dir" "${bridge_args[@]}" && [ -n "${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-}" ]; then
+                        bridge_args=(--output-dir "$XTS_WINDOWS_BRIDGE_OUTPUT_ROOT" "${bridge_args[@]}")
+                    fi
+                    if ! has_long_flag "--run-store-root" "${bridge_args[@]}"; then
+                        bridge_args=(--run-store-root "$(xts_default_run_store_root)" "${bridge_args[@]}")
+                    fi
+                    run_xts_bridge_tool package-windows "${bridge_args[@]}"
+                    ;;
+                *)
+                    err "xts bridge: unknown subcommand: $bridge_subcmd"
+                    print_help_xts_bridge
+                    exit 1
+                    ;;
+            esac
+            ;;
         --*)
             run_xts_selector "$subcmd" "$@"
             ;;
@@ -1335,14 +1594,19 @@ What it runs:
 Notes:
   - The script swaps ~/.npmrc only for the prebuilts step and restores it after.
   - Proxy fallback applies only when configured.
+  - If a sync stage fails, the script prints the stage name and a saved log path.
 
 Options:
+  -f, --force
+      Back up a conflicting sibling prebuilts path automatically and, if repo checkout fails,
+      discard local tracked/untracked changes in the failing repos before retrying.
   --skip-lfs
   --skip-prebuilts
   --repo-only
 
 Examples:
   ohos sync
+  ohos sync -f
   ohos sync build
   ohos sync --repo-only
 HELP
@@ -1509,6 +1773,7 @@ Supported subcommands:
   select     Save a reusable selector report; accepts a raw MR URL as the first arg
   run        Execute from a saved report (ohos xts run last) or raw selector args
   compare    Compare two XTS runs by label or by result paths
+  bridge     Generate Windows helper bundles for SSH + HDC RK3568 access
   sdk        Convenience wrapper for --download-daily-sdk
   tests      Convenience wrapper for --download-daily-tests
   firmware   Convenience wrapper for --download-daily-firmware
@@ -1527,6 +1792,8 @@ Notes:
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
   - 'ohos xts flash' auto-injects FLASH_PY_PATH / HDC_PATH from $OHOS_CONF
     when those files exist and you do not override them explicitly.
+  - If XTS_HDC_ENDPOINT is set in $OHOS_CONF, select/run flows auto-target that
+    remote HDC server for generated commands and preflight.
 
 Recommended flow:
   1. Pick tests and save a reusable report:
@@ -1555,6 +1822,48 @@ Examples:
   ohos xts sdk --sdk-build-tag 20260404_120537
   ohos xts firmware --firmware-build-tag 20260404_120244
   ohos xts flash --firmware-build-tag 20260404_120244 --device <serial>
+  ohos xts bridge package-windows --server-host tsnnlx12bs01 --server-user \$USER --last-report
+HELP
+}
+
+print_help_xts_bridge() {
+    cat <<HELP
+xts bridge - package Windows helpers for RK3568 over SSH + HDC
+
+What it runs:
+  python3 "$OHOS_XTS_BRIDGE_TOOL" package-windows ...
+
+Purpose:
+  - Start an HDC service on a Windows PC with a USB-connected RK3568 device
+  - Open an SSH reverse tunnel back to the Linux server
+  - Optionally package a selector report as ready-to-run local aa_test commands
+
+Supported subcommands:
+  package-windows   Build a ZIP bundle with README + PowerShell bridge scripts
+
+Important defaults:
+  - Linux-side forwarded HDC port defaults to 28710
+  - Windows-side local HDC port defaults to 8710
+  - Default bundle output directory:
+      $XTS_WINDOWS_BRIDGE_OUTPUT_ROOT
+  - If you pass --last-report, the wrapper defaults run-store root to:
+      $(xts_default_run_store_root)
+
+Recommended flow:
+  1. Save the selector report on the server:
+     ohos xts select https://gitcode.com/openharmony/arkui_ace_engine/pull/83368
+  2. Build the Windows bundle:
+     ohos xts bridge package-windows --server-host <server> --server-user <user> --last-report
+  3. On Windows:
+     - unpack the archive
+     - ensure ssh and hdc.exe are available
+     - run start_hdc_bridge.ps1
+  4. Back on the Linux server:
+     ohos xts run last --hdc-endpoint 127.0.0.1:28710
+
+Examples:
+  ohos xts bridge package-windows --server-host tsnnlx12bs01 --server-user dmazur --last-report
+  ohos xts bridge package-windows --server-host 10.0.0.10 --server-user user --selector-report /tmp/selector_report.json --output /tmp/rk3568_bundle.zip
 HELP
 }
 
@@ -1779,7 +2088,7 @@ while [ $# -gt 0 ]; do
             sync_args=()
             while [ $# -gt 0 ] && ! is_chainable_command "$1"; do
                 case "$1" in
-                    --skip-lfs|--skip-prebuilts|--repo-only)
+                    -f|--force|--skip-lfs|--skip-prebuilts|--repo-only)
                         sync_args+=("$1")
                         shift
                         ;;
