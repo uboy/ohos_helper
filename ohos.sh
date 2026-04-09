@@ -77,6 +77,7 @@ SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
 FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
 XTS_HDC_ENDPOINT="${XTS_HDC_ENDPOINT:-}"
 XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
+OHOS_REPO_ROOT="${OHOS_REPO_ROOT:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -142,6 +143,12 @@ is_repo_initialized() {
 
 is_ohos_repo() {
     [[ -d ".repo" ]] && [[ -f "build/prebuilts_download.sh" ]]
+}
+
+looks_like_ohos_repo_root() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 1
+    [[ -d "$candidate/.repo" ]] && [[ -f "$candidate/build/prebuilts_download.sh" ]]
 }
 
 require_repo_initialized() {
@@ -1152,7 +1159,23 @@ cmd_pr() {
 run_xts_selector() {
     require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
     local xts_extra=()
+    local xts_repo_root=""
     local _gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
+
+    if ! has_long_flag "--repo-root" "$@"; then
+        for xts_repo_root in \
+            "${OHOS_REPO_ROOT:-}" \
+            "$(pwd)" \
+            "$HOME/proj/ohos_master" \
+            "$HOME/ohos_master"
+        do
+            if looks_like_ohos_repo_root "$xts_repo_root"; then
+                xts_extra+=(--repo-root "$xts_repo_root")
+                break
+            fi
+        done
+    fi
+
     if [ -f "$_gitcode_cfg" ]; then
         xts_extra+=(--git-host-config "$_gitcode_cfg")
     fi
@@ -1792,6 +1815,9 @@ Notes:
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
   - 'ohos xts flash' auto-injects FLASH_PY_PATH / HDC_PATH from $OHOS_CONF
     when those files exist and you do not override them explicitly.
+  - When launched outside an OHOS repo, the wrapper auto-injects --repo-root
+    from OHOS_REPO_ROOT, the current directory if it is an OHOS tree, or
+    common defaults like $HOME/proj/ohos_master.
   - If XTS_HDC_ENDPOINT is set in $OHOS_CONF, select/run flows auto-target that
     remote HDC server for generated commands and preflight.
 
