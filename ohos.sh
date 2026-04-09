@@ -78,6 +78,7 @@ FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
 XTS_HDC_ENDPOINT="${XTS_HDC_ENDPOINT:-}"
 XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
 OHOS_REPO_ROOT="${OHOS_REPO_ROOT:-}"
+HDC_LIBRARY_PATH="${HDC_LIBRARY_PATH:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -149,6 +150,37 @@ looks_like_ohos_repo_root() {
     local candidate="${1:-}"
     [ -n "$candidate" ] || return 1
     [[ -d "$candidate/.repo" ]] && [[ -f "$candidate/build/prebuilts_download.sh" ]]
+}
+
+detect_hdc_library_path() {
+    local hdc_dir=""
+    local candidate
+
+    if [ -n "${HDC_LIBRARY_PATH:-}" ] && [ -d "${HDC_LIBRARY_PATH}" ]; then
+        printf '%s\n' "${HDC_LIBRARY_PATH}"
+        return 0
+    fi
+
+    if [ -z "${HDC_PATH:-}" ] || [ ! -f "${HDC_PATH}" ]; then
+        return 1
+    fi
+
+    hdc_dir="$(cd "$(dirname "${HDC_PATH}")" && pwd)"
+    for candidate in \
+        "${hdc_dir}" \
+        "${hdc_dir}/lib" \
+        "${hdc_dir}/../lib" \
+        "${hdc_dir}/lib64" \
+        "${hdc_dir}/../lib64" \
+        "$HOME/proj/command-line-tools/sdk"/*/openharmony/toolchains \
+        "$HOME/command-line-tools/sdk"/*/openharmony/toolchains
+    do
+        if [ -d "$candidate" ] && [ -f "$candidate/libusb_shared.so" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 require_repo_initialized() {
@@ -1159,7 +1191,9 @@ cmd_pr() {
 run_xts_selector() {
     require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
     local xts_extra=()
+    local xts_env=()
     local xts_repo_root=""
+    local hdc_lib_dir=""
     local _gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
 
     if ! has_long_flag "--repo-root" "$@"; then
@@ -1185,7 +1219,14 @@ run_xts_selector() {
     if [ -n "${XTS_HDC_ENDPOINT:-}" ]; then
         xts_extra+=(--hdc-endpoint "$XTS_HDC_ENDPOINT")
     fi
-    PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
+    xts_env+=(PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src")
+    xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos xts")
+    xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_MODE="wrapper")
+    if hdc_lib_dir="$(detect_hdc_library_path 2>/dev/null)"; then
+        xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
+        xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+    fi
+    env "${xts_env[@]}" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
 }
 
 run_xts_compare() {
@@ -1815,6 +1856,9 @@ Notes:
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
   - 'ohos xts flash' auto-injects FLASH_PY_PATH / HDC_PATH from $OHOS_CONF
     when those files exist and you do not override them explicitly.
+  - If HDC needs extra shared libraries such as libusb_shared.so, set
+    HDC_LIBRARY_PATH in $OHOS_CONF or let the wrapper auto-detect a common
+    SDK/toolchains location.
   - When launched outside an OHOS repo, the wrapper auto-injects --repo-root
     from OHOS_REPO_ROOT, the current directory if it is an OHOS tree, or
     common defaults like $HOME/proj/ohos_master.
