@@ -6,3 +6,5 @@ coordination/
 __pycache__/
 gitee_util/
 arkui-xts-selector/
+arkui_xts_selector_report.json
+logs/

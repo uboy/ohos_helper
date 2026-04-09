@@ -153,6 +153,7 @@ looks_like_ohos_repo_root() {
 }
 
 detect_hdc_library_path() {
+    local hdc_path="${1:-${HDC_PATH:-}}"
     local hdc_dir=""
     local candidate
 
@@ -161,11 +162,11 @@ detect_hdc_library_path() {
         return 0
     fi
 
-    if [ -z "${HDC_PATH:-}" ] || [ ! -f "${HDC_PATH}" ]; then
+    if [ -z "${hdc_path}" ] || [ ! -f "${hdc_path}" ]; then
         return 1
     fi
 
-    hdc_dir="$(cd "$(dirname "${HDC_PATH}")" && pwd)"
+    hdc_dir="$(cd "$(dirname "${hdc_path}")" && pwd)"
     for candidate in \
         "${hdc_dir}" \
         "${hdc_dir}/lib" \
@@ -180,6 +181,55 @@ detect_hdc_library_path() {
             return 0
         fi
     done
+    return 1
+}
+
+hdc_help_command_works() {
+    local hdc_path="${1:-}"
+    local hdc_lib_dir=""
+
+    [ -n "${hdc_path}" ] || return 1
+    [ -f "${hdc_path}" ] || return 1
+
+    if timeout 5s "${hdc_path}" -h >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if hdc_lib_dir="$(detect_hdc_library_path "${hdc_path}" 2>/dev/null)"; then
+        timeout 5s env \
+            LD_LIBRARY_PATH="${hdc_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            "${hdc_path}" -h >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+resolve_preferred_hdc_path() {
+    local configured_hdc="${HDC_PATH:-}"
+    local path_hdc=""
+
+    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ] && hdc_help_command_works "${configured_hdc}"; then
+        printf '%s\n' "${configured_hdc}"
+        return 0
+    fi
+
+    path_hdc="$(command -v hdc 2>/dev/null || true)"
+    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ] && hdc_help_command_works "${path_hdc}"; then
+        printf '%s\n' "${path_hdc}"
+        return 0
+    fi
+
+    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ]; then
+        printf '%s\n' "${configured_hdc}"
+        return 0
+    fi
+
+    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ]; then
+        printf '%s\n' "${path_hdc}"
+        return 0
+    fi
+
     return 1
 }
 
@@ -1193,6 +1243,8 @@ run_xts_selector() {
     local xts_extra=()
     local xts_env=()
     local xts_repo_root=""
+    local explicit_hdc_path=""
+    local resolved_hdc_path=""
     local hdc_lib_dir=""
     local _gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
 
@@ -1213,8 +1265,12 @@ run_xts_selector() {
     if [ -f "$_gitcode_cfg" ]; then
         xts_extra+=(--git-host-config "$_gitcode_cfg")
     fi
-    if [ -n "${HDC_PATH:-}" ] && [ -f "${HDC_PATH}" ]; then
-        xts_extra+=(--hdc-path "$HDC_PATH")
+    if explicit_hdc_path="$(get_long_flag_value "--hdc-path" "$@" 2>/dev/null)"; then
+        resolved_hdc_path="$explicit_hdc_path"
+    else
+        if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+            xts_extra+=(--hdc-path "$resolved_hdc_path")
+        fi
     fi
     if [ -n "${XTS_HDC_ENDPOINT:-}" ]; then
         xts_extra+=(--hdc-endpoint "$XTS_HDC_ENDPOINT")
@@ -1222,7 +1278,7 @@ run_xts_selector() {
     xts_env+=(PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src")
     xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos xts")
     xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_MODE="wrapper")
-    if hdc_lib_dir="$(detect_hdc_library_path 2>/dev/null)"; then
+    if hdc_lib_dir="$(detect_hdc_library_path "${resolved_hdc_path:-${HDC_PATH:-}}" 2>/dev/null)"; then
         xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
         xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
     fi
@@ -1263,6 +1319,29 @@ has_long_flag() {
                 return 0
                 ;;
         esac
+    done
+    return 1
+}
+
+get_long_flag_value() {
+    local wanted="$1"
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            "${wanted}")
+                shift || true
+                if [ $# -gt 0 ]; then
+                    printf '%s\n' "$1"
+                    return 0
+                fi
+                return 1
+                ;;
+            "${wanted}"=*)
+                printf '%s\n' "${1#*=}"
+                return 0
+                ;;
+        esac
+        shift || true
     done
     return 1
 }
@@ -1516,8 +1595,11 @@ cmd_xts() {
             if [ -n "${FLASH_PY_PATH:-}" ] && [ -f "${FLASH_PY_PATH}" ] && ! has_long_flag "--flash-py-path" "$@"; then
                 flash_args+=(--flash-py-path "$FLASH_PY_PATH")
             fi
-            if [ -n "${HDC_PATH:-}" ] && [ -f "${HDC_PATH}" ] && ! has_long_flag "--hdc-path" "$@"; then
-                flash_args+=(--hdc-path "$HDC_PATH")
+            if ! has_long_flag "--hdc-path" "$@"; then
+                local resolved_hdc_path=""
+                if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+                    flash_args+=(--hdc-path "$resolved_hdc_path")
+                fi
             fi
             run_xts_selector --flash-daily-firmware "${flash_args[@]}" "$@"
             ;;
