@@ -61,6 +61,11 @@ class OhosPrWrapperTests(unittest.TestCase):
                 "  print('--- bob @ 2026-04-10T13:30:00Z ---')\n"
                 "  print('Reply body')\n"
                 "  sys.exit(0)\n"
+                "if args and args[0] == 'show-pr':\n"
+                "  print('PR #83368')\n"
+                "  print('Title: Improve chipgroup behavior')\n"
+                "  print('Changed Files: 1')\n"
+                "  sys.exit(0)\n"
                 "print('unexpected command', args)\n"
             ),
         )
@@ -117,6 +122,25 @@ class OhosPrWrapperTests(unittest.TestCase):
         self.assertIn("quit with q", result.stdout)
         self.assertNotIn("The vendored tool repo lives at:", result.stdout)
         self.assertNotIn("To update that tool later:", result.stdout)
+
+    def test_pr_show_pr_routes_to_runner(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "pr",
+                "show-pr",
+                "--url",
+                "https://gitcode.com/openharmony/arkui_ace_engine/pull/83368",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PR #83368", result.stdout)
+        self.assertIn("Title: Improve chipgroup behavior", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1558,7 +1558,7 @@ cmd_pr() {
             rm -f "$comments_output"
             return "$comments_rc"
             ;;
-        create-pr|create-issue|create-issue-pr|comment-pr|list-pr)
+        create-pr|create-issue|create-issue-pr|comment-pr|list-pr|show-pr)
             ensure_gitee_util_runtime
             ohos_run_foreground "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@"
             ;;
