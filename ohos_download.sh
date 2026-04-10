@@ -14,6 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
+OHOS_XTS_ARTIFACTS_TOOL="${OHOS_XTS_ARTIFACTS_TOOL:-${SCRIPT_DIR}/ohos_xts_artifacts.py}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
 FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
@@ -117,10 +118,13 @@ download_handle_signal() {
 trap 'download_handle_signal INT 130 "Script stopped by Ctrl+C."' INT
 trap 'download_handle_signal TERM 143 "Script stopped by SIGTERM."' TERM
 
-run_xts_selector_download() {
+run_xts_artifacts_tool() {
     require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
+    if [ ! -f "$OHOS_XTS_ARTIFACTS_TOOL" ]; then
+        err "Missing XTS artifacts tool: $OHOS_XTS_ARTIFACTS_TOOL"
+        exit 1
+    fi
     local extra_args=()
-    local gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
 
     if [ -n "${SDK_DOWNLOAD_ROOT:-}" ]; then
         extra_args+=(--sdk-cache-root "$SDK_DOWNLOAD_ROOT")
@@ -128,14 +132,11 @@ run_xts_selector_download() {
     if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
         extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
     fi
-    if [ -f "$gitcode_cfg" ]; then
-        extra_args+=(--git-host-config "$gitcode_cfg")
-    fi
 
     download_run_foreground env \
         PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" \
-        ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos download" \
-        python3 -m arkui_xts_selector "${extra_args[@]}" "$@"
+        ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR}" \
+        python3 "$OHOS_XTS_ARTIFACTS_TOOL" "$@" "${extra_args[@]}"
 }
 
 download_tag_flag_for_subcmd() {
@@ -287,7 +288,7 @@ download_collect_recent_tags() {
     local line=""
 
     DOWNLOAD_MENU_TAGS=()
-    if ! output="$(run_xts_selector_download --list-daily-tags "$subcmd" "$@" 2>&1)"; then
+    if ! output="$(run_xts_artifacts_tool list-tags "$subcmd" "$@" 2>&1)"; then
         printf '%s\n' "$output" >&2
         return 1
     fi
@@ -422,12 +423,12 @@ cmd_download() {
                         return "$menu_rc"
                     fi
                 else
-                    run_xts_selector_download --list-daily-tags tests "${tests_args[@]}"
+                    run_xts_artifacts_tool list-tags tests "${tests_args[@]}"
                     print_download_tag_hint tests
                     return 0
                 fi
             fi
-            run_xts_selector_download --download-daily-tests "${tests_args[@]}"
+            run_xts_artifacts_tool download tests "${tests_args[@]}"
             ;;
         sdk)
             local sdk_args=("$@")
@@ -448,12 +449,12 @@ cmd_download() {
                         return "$menu_rc"
                     fi
                 else
-                    run_xts_selector_download --list-daily-tags sdk "${sdk_args[@]}"
+                    run_xts_artifacts_tool list-tags sdk "${sdk_args[@]}"
                     print_download_tag_hint sdk
                     return 0
                 fi
             fi
-            run_xts_selector_download --download-daily-sdk "${sdk_args[@]}"
+            run_xts_artifacts_tool download sdk "${sdk_args[@]}"
             ;;
         firmware)
             local firmware_args=("$@")
@@ -474,19 +475,19 @@ cmd_download() {
                         return "$menu_rc"
                     fi
                 else
-                    run_xts_selector_download --list-daily-tags firmware "${firmware_args[@]}"
+                    run_xts_artifacts_tool list-tags firmware "${firmware_args[@]}"
                     print_download_tag_hint firmware
                     return 0
                 fi
             fi
-            run_xts_selector_download --download-daily-firmware "${firmware_args[@]}"
+            run_xts_artifacts_tool download firmware "${firmware_args[@]}"
             ;;
         list-tags)
             local list_type="${1:-tests}"
             if [ $# -gt 0 ]; then
                 shift
             fi
-            run_xts_selector_download --list-daily-tags "$list_type" "$@"
+            run_xts_artifacts_tool list-tags "$list_type" "$@"
             ;;
         *)
             err "download: unknown subcommand: $subcmd"

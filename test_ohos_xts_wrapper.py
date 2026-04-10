@@ -64,6 +64,7 @@ class OhosXtsWrapperTests(unittest.TestCase):
         self.helper_capture_path = self.root / "helper_capture.json"
         self.bridge_capture_path = self.root / "bridge_capture.json"
         self.download_capture_path = self.root / "download_capture.json"
+        self.artifacts_capture_path = self.root / "artifacts_capture.json"
         (package_dir / "__main__.py").write_text(
             (
                 "import json\n"
@@ -133,6 +134,33 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "from pathlib import Path\n"
                 "Path(os.environ['TEST_DOWNLOAD_CAPTURE']).write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
                 "PY\n"
+            ),
+        )
+        self.fake_artifacts_tool = self.root / "ohos_xts_artifacts.py"
+        write_executable(
+            self.fake_artifacts_tool,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "fake_tags = [item.strip() for item in os.environ.get('TEST_SELECTOR_FAKE_TAGS', '').split(',') if item.strip()]\n"
+                "args = sys.argv[1:]\n"
+                "if len(args) >= 2 and args[0] == 'list-tags' and fake_tags:\n"
+                "  tag_type = args[1]\n"
+                "  print(f'Listing {len(fake_tags)} most recent {tag_type} tags (component=fake, branch=master):')\n"
+                "  for tag in fake_tags:\n"
+                "    print(f'  {tag}')\n"
+                "  sys.exit(0)\n"
+                "capture_path = Path(os.environ['TEST_ARTIFACTS_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({\n"
+                "  'argv': args,\n"
+                "  'env': {\n"
+                "    'ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH': os.environ.get('ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH', ''),\n"
+                "    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),\n"
+                "  },\n"
+                "}, indent=2), encoding='utf-8')\n"
             ),
         )
 
@@ -216,6 +244,8 @@ exit 127
         self.env["OHOS_XTS_BRIDGE_TOOL"] = str(self.fake_bridge_tool)
         self.env["TEST_BRIDGE_CAPTURE"] = str(self.bridge_capture_path)
         self.env["TEST_DOWNLOAD_CAPTURE"] = str(self.download_capture_path)
+        self.env["OHOS_XTS_ARTIFACTS_TOOL"] = str(self.fake_artifacts_tool)
+        self.env["TEST_ARTIFACTS_CAPTURE"] = str(self.artifacts_capture_path)
         self.env["USER"] = "deviceuser"
 
     def run_and_signal(self, cmd, env, sig):
@@ -264,9 +294,9 @@ exit 127
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
         argv = capture["argv"]
-        self.assertIn("--flash-daily-firmware", argv)
+        self.assertEqual(argv[0], "flash")
         self.assertIn("--flash-py-path", argv)
         self.assertIn("--hdc-path", argv)
         flash_index = argv.index("--flash-py-path")
@@ -296,9 +326,9 @@ exit 127
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
         argv = capture["argv"]
-        self.assertIn("--flash-daily-firmware", argv)
+        self.assertEqual(argv[0], "flash")
         self.assertIn("--flash-py-path", argv)
         self.assertIn("--hdc-path", argv)
         flash_index = argv.index("--flash-py-path")
@@ -513,9 +543,10 @@ exit 127
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
         argv = capture["argv"]
-        self.assertIn("--download-daily-sdk", argv)
+        self.assertEqual(argv[0], "download")
+        self.assertEqual(argv[1], "sdk")
         self.assertIn("--sdk-build-tag", argv)
         self.assertEqual(argv[argv.index("--sdk-build-tag") + 1], "20260409_120125")
 

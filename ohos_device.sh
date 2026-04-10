@@ -14,6 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
+OHOS_XTS_ARTIFACTS_TOOL="${OHOS_XTS_ARTIFACTS_TOOL:-${SCRIPT_DIR}/ohos_xts_artifacts.py}"
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
@@ -161,55 +162,32 @@ resolve_preferred_flash_py_path() {
     return 1
 }
 
-run_xts_selector() {
+run_xts_artifacts_tool() {
     if [ ! -d "$ARKUI_XTS_SELECTOR_DIR" ]; then
         err "Missing XTS selector repo: $ARKUI_XTS_SELECTOR_DIR"
         exit 1
     fi
+    if [ ! -f "$OHOS_XTS_ARTIFACTS_TOOL" ]; then
+        err "Missing XTS artifacts tool: $OHOS_XTS_ARTIFACTS_TOOL"
+        exit 1
+    fi
 
-    local xts_extra=()
     local xts_env=()
-    local xts_repo_root=""
-    local explicit_hdc_path=""
-    local resolved_hdc_path=""
+    local explicit_hdc_path="${1:-}"
+    shift || true
+    local resolved_hdc_path="${explicit_hdc_path:-}"
     local hdc_lib_dir=""
-    local gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
 
-    if ! has_long_flag "--repo-root" "$@"; then
-        for xts_repo_root in \
-            "${OHOS_REPO_ROOT:-}" \
-            "$(pwd)" \
-            "$HOME/proj/ohos_master" \
-            "$HOME/ohos_master"
-        do
-            if looks_like_ohos_repo_root "$xts_repo_root"; then
-                xts_extra+=(--repo-root "$xts_repo_root")
-                break
-            fi
-        done
-    fi
-
-    if [ -f "$gitcode_cfg" ]; then
-        xts_extra+=(--git-host-config "$gitcode_cfg")
-    fi
-    if explicit_hdc_path="$(get_long_flag_value "--hdc-path" "$@" 2>/dev/null)"; then
-        resolved_hdc_path="$explicit_hdc_path"
-    else
-        if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
-            xts_extra+=(--hdc-path "$resolved_hdc_path")
-        fi
-    fi
-    if [ -n "${XTS_HDC_ENDPOINT:-}" ]; then
-        xts_extra+=(--hdc-endpoint "$XTS_HDC_ENDPOINT")
-    fi
     xts_env+=(PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src")
-    xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos device")
     xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_MODE="wrapper")
     if hdc_lib_dir="$(detect_hdc_library_path "${resolved_hdc_path:-${HDC_PATH:-}}" 2>/dev/null)"; then
         xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
         xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
     fi
-    device_run_foreground env "${xts_env[@]}" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
+    device_run_foreground env \
+        "${xts_env[@]}" \
+        ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR}" \
+        python3 "$OHOS_XTS_ARTIFACTS_TOOL" "$@"
 }
 
 is_non_loopback_ipv4() {
@@ -438,13 +416,9 @@ print_help_device_flash() {
     cat <<HELP
 device flash - flash a daily firmware package or a local unpacked image bundle
 
-What it runs:
-  python3 -m arkui_xts_selector --flash-daily-firmware ...
-
 Behavior:
   - prefers a runnable `flash.py` with a matching neighboring `bin/flash.<arch>`
   - prefers a runnable `hdc` and propagates its library path when needed
-  - auto-detects the OHOS repo root if you run the command inside a checkout
   - accepts either daily firmware flags or a local image bundle path
 
 Examples:
@@ -538,7 +512,7 @@ cmd_flash() {
         fi
     fi
 
-    run_xts_selector --flash-daily-firmware "${selector_args[@]}" "${flash_args[@]}"
+    run_xts_artifacts_tool "${resolved_hdc_path:-}" flash "${selector_args[@]}" "${flash_args[@]}"
 }
 
 subcmd="${1:-help}"
