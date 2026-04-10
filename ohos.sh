@@ -1539,6 +1539,16 @@ cmd_pr() {
         shift
     fi
 
+    if [ $# -gt 0 ] && [[ "${1:-}" =~ ^https?://[^[:space:]]+/(pull|pulls|merge_requests)/[0-9]+/?$ ]]; then
+        if ! has_long_flag "--url" "$@"; then
+            case "$subcmd" in
+                show-pr|show-comments)
+                    set -- --url "$1" "${@:2}"
+                    ;;
+            esac
+        fi
+    fi
+
     case "$subcmd" in
         help|--help|-h|"")
             print_help_pr

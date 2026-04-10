@@ -142,6 +142,40 @@ class OhosPrWrapperTests(unittest.TestCase):
         self.assertIn("PR #83368", result.stdout)
         self.assertIn("Title: Improve chipgroup behavior", result.stdout)
 
+    def test_pr_show_pr_accepts_positional_url(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "pr",
+                "show-pr",
+                "https://gitcode.com/openharmony/arkui_ace_engine/pull/83368",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PR #83368", result.stdout)
+
+    def test_pr_show_comments_accepts_positional_url(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "pr",
+                "show-comments",
+                "https://gitcode.com/openharmony/arkui_ace_engine/pull/83368",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Comments for PR #123 in owner/repo:", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
