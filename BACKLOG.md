@@ -55,6 +55,9 @@ Status legend:
 - `done` Extract `ohos download` into a dedicated tool
   - move download selection/help/menu logic into `ohos_download.sh`
   - keep `ohos.sh` as a thin dispatcher for `download`
+- `done` Extract flash entrypoint into the device tool
+  - move flash routing and path resolution into `ohos_device.sh`
+  - keep `ohos xts flash` only as a compatibility alias
 - `done` Clean signal handling
   - `Ctrl+C`
   - `SIGTERM`

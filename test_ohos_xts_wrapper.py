@@ -262,6 +262,38 @@ exit 127
         self.assertEqual(capture["env"]["ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH"], str(self.hdc_lib_dir))
         self.assertTrue(capture["env"]["LD_LIBRARY_PATH"].startswith(str(self.hdc_lib_dir)))
 
+    def test_device_flash_prefers_working_hdc_from_path_when_configured_binary_is_broken(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "device",
+                "flash",
+                "--firmware-component",
+                "dayu200",
+                "--firmware-build-tag",
+                "20260409_180241",
+                "--firmware-date",
+                "20260409",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--flash-daily-firmware", argv)
+        self.assertIn("--flash-py-path", argv)
+        self.assertIn("--hdc-path", argv)
+        flash_index = argv.index("--flash-py-path")
+        self.assertEqual(argv[flash_index + 1], str(self.working_flash_root / "flash.py"))
+        hdc_index = argv.index("--hdc-path")
+        self.assertEqual(argv[hdc_index + 1], str(self.working_hdc))
+        self.assertEqual(capture["env"]["ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH"], str(self.hdc_lib_dir))
+        self.assertTrue(capture["env"]["LD_LIBRARY_PATH"].startswith(str(self.hdc_lib_dir)))
+
     def test_xts_select_infers_changed_file_from_positional_path(self):
         relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"
 
@@ -348,6 +380,7 @@ exit 127
         self.assertIn("Run on the Windows PC with the USB-connected device:", result.stdout)
         self.assertIn("auto-detects the Linux test server IP and current user", result.stdout)
         self.assertIn("--hdc-endpoint 127.0.0.1:28710", result.stdout)
+        self.assertIn("ohos device flash --firmware-component dayu200", result.stdout)
 
     def test_device_bridge_help_explains_host_roles_and_auto_detection(self):
         result = run_cmd(

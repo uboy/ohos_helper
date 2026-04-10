@@ -1775,20 +1775,8 @@ cmd_xts() {
             run_xts_selector --download-daily-firmware "$@"
             ;;
         flash)
-            local flash_args=()
-            if ! has_long_flag "--flash-py-path" "$@"; then
-                local resolved_flash_py=""
-                if resolved_flash_py="$(resolve_preferred_flash_py_path 2>/dev/null)"; then
-                    flash_args+=(--flash-py-path "$resolved_flash_py")
-                fi
-            fi
-            if ! has_long_flag "--hdc-path" "$@"; then
-                local resolved_hdc_path=""
-                if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
-                    flash_args+=(--hdc-path "$resolved_hdc_path")
-                fi
-            fi
-            run_xts_selector --flash-daily-firmware "${flash_args[@]}" "$@"
+            warn "xts flash is deprecated; use 'ohos device flash ...' instead."
+            cmd_device flash "$@"
             ;;
         bridge)
             warn "xts bridge is deprecated; use 'ohos device bridge ...' instead."
@@ -2151,7 +2139,7 @@ Supported subcommands:
   sdk        Convenience wrapper for --download-daily-sdk
   tests      Convenience wrapper for --download-daily-tests
   firmware   Convenience wrapper for --download-daily-firmware
-  flash      Convenience wrapper for --flash-daily-firmware
+  flash      Compatibility alias; prefer 'ohos device flash'
 
 Notes:
   - The vendored tool repo lives at: $ARKUI_XTS_SELECTOR_DIR
@@ -2164,8 +2152,7 @@ Notes:
       --run-label <user__context>
     unless you override them explicitly.
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
-  - 'ohos xts flash' auto-injects FLASH_PY_PATH / HDC_PATH from $OHOS_CONF
-    when those files exist and you do not override them explicitly.
+  - 'ohos xts flash' is a compatibility alias to 'ohos device flash'.
   - If HDC needs extra shared libraries such as libusb_shared.so, set
     HDC_LIBRARY_PATH in $OHOS_CONF or let the wrapper auto-detect a common
     SDK/toolchains location.

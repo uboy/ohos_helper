@@ -14,9 +14,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
+ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
 OHOS_DEVICE_SERVER_HOST="${OHOS_DEVICE_SERVER_HOST:-}"
 OHOS_DEVICE_SERVER_USER="${OHOS_DEVICE_SERVER_USER:-}"
+OHOS_REPO_ROOT="${OHOS_REPO_ROOT:-}"
 OHOS_DEVICE_ACTIVE_CHILD_PID=""
 OHOS_DEVICE_SIGNAL_MESSAGE_EMITTED=0
 
@@ -109,12 +111,230 @@ has_long_flag() {
         if [ "$item" = "$wanted" ]; then
             return 0
         fi
+        case "$item" in
+            "${wanted}"=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+get_long_flag_value() {
+    local wanted="$1"
+    shift || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            "${wanted}")
+                shift || true
+                if [ $# -gt 0 ]; then
+                    printf '%s\n' "$1"
+                    return 0
+                fi
+                return 1
+                ;;
+            "${wanted}"=*)
+                printf '%s\n' "${1#*=}"
+                return 0
+                ;;
+        esac
+        shift || true
     done
     return 1
 }
 
 xts_default_run_store_root() {
     printf '%s\n' "${SCRIPT_DIR}/arkui-xts-selector/.runs"
+}
+
+looks_like_ohos_repo_root() {
+    local candidate="${1:-}"
+    [ -n "$candidate" ] || return 1
+    [[ -d "$candidate/.repo" ]] && [[ -f "$candidate/build/prebuilts_download.sh" ]]
+}
+
+detect_hdc_library_path() {
+    local hdc_path="${1:-${HDC_PATH:-}}"
+    local hdc_dir=""
+    local candidate=""
+
+    if [ -n "${HDC_LIBRARY_PATH:-}" ] && [ -d "${HDC_LIBRARY_PATH}" ]; then
+        printf '%s\n' "${HDC_LIBRARY_PATH}"
+        return 0
+    fi
+
+    if [ -z "${hdc_path}" ] || [ ! -f "${hdc_path}" ]; then
+        return 1
+    fi
+
+    hdc_dir="$(cd "$(dirname "${hdc_path}")" && pwd)"
+    for candidate in \
+        "${hdc_dir}" \
+        "${hdc_dir}/lib" \
+        "${hdc_dir}/../lib" \
+        "${hdc_dir}/lib64" \
+        "${hdc_dir}/../lib64" \
+        "$HOME/proj/command-line-tools/sdk"/*/openharmony/toolchains \
+        "$HOME/command-line-tools/sdk"/*/openharmony/toolchains
+    do
+        if [ -d "$candidate" ] && [ -f "$candidate/libusb_shared.so" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+hdc_help_command_works() {
+    local hdc_path="${1:-}"
+    local hdc_lib_dir=""
+
+    [ -n "${hdc_path}" ] || return 1
+    [ -f "${hdc_path}" ] || return 1
+
+    if timeout 5s "${hdc_path}" -h >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if hdc_lib_dir="$(detect_hdc_library_path "${hdc_path}" 2>/dev/null)"; then
+        timeout 5s env \
+            LD_LIBRARY_PATH="${hdc_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+            "${hdc_path}" -h >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+resolve_preferred_hdc_path() {
+    local configured_hdc="${HDC_PATH:-}"
+    local path_hdc=""
+
+    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ] && hdc_help_command_works "${configured_hdc}"; then
+        printf '%s\n' "${configured_hdc}"
+        return 0
+    fi
+
+    path_hdc="$(command -v hdc 2>/dev/null || true)"
+    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ] && hdc_help_command_works "${path_hdc}"; then
+        printf '%s\n' "${path_hdc}"
+        return 0
+    fi
+
+    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ]; then
+        printf '%s\n' "${configured_hdc}"
+        return 0
+    fi
+
+    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ]; then
+        printf '%s\n' "${path_hdc}"
+        return 0
+    fi
+
+    return 1
+}
+
+flash_py_has_neighbor_tool() {
+    local flash_py_path="${1:-}"
+    local machine=""
+    local candidate=""
+
+    [ -n "${flash_py_path}" ] || return 1
+    [ -f "${flash_py_path}" ] || return 1
+
+    machine="$(uname -m 2>/dev/null || printf '%s' 'x86_64')"
+    candidate="$(cd "$(dirname "${flash_py_path}")" 2>/dev/null && pwd)/bin/flash.${machine}"
+    [ -f "${candidate}" ]
+}
+
+resolve_preferred_flash_py_path() {
+    local configured_flash="${FLASH_PY_PATH:-}"
+    local path_flash=""
+    local home_flash="${HOME}/bin/linux/flash.py"
+
+    if [ -n "${configured_flash}" ] && [ -f "${configured_flash}" ] && flash_py_has_neighbor_tool "${configured_flash}"; then
+        printf '%s\n' "${configured_flash}"
+        return 0
+    fi
+
+    path_flash="$(command -v flash.py 2>/dev/null || true)"
+    if [ -n "${path_flash}" ] && [ -f "${path_flash}" ] && flash_py_has_neighbor_tool "${path_flash}"; then
+        printf '%s\n' "${path_flash}"
+        return 0
+    fi
+
+    if [ -f "${home_flash}" ] && flash_py_has_neighbor_tool "${home_flash}"; then
+        printf '%s\n' "${home_flash}"
+        return 0
+    fi
+
+    if [ -n "${configured_flash}" ] && [ -f "${configured_flash}" ]; then
+        printf '%s\n' "${configured_flash}"
+        return 0
+    fi
+
+    if [ -n "${path_flash}" ] && [ -f "${path_flash}" ]; then
+        printf '%s\n' "${path_flash}"
+        return 0
+    fi
+
+    if [ -f "${home_flash}" ]; then
+        printf '%s\n' "${home_flash}"
+        return 0
+    fi
+
+    return 1
+}
+
+run_xts_selector() {
+    if [ ! -d "$ARKUI_XTS_SELECTOR_DIR" ]; then
+        err "Missing XTS selector repo: $ARKUI_XTS_SELECTOR_DIR"
+        exit 1
+    fi
+
+    local xts_extra=()
+    local xts_env=()
+    local xts_repo_root=""
+    local explicit_hdc_path=""
+    local resolved_hdc_path=""
+    local hdc_lib_dir=""
+    local gitcode_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini"
+
+    if ! has_long_flag "--repo-root" "$@"; then
+        for xts_repo_root in \
+            "${OHOS_REPO_ROOT:-}" \
+            "$(pwd)" \
+            "$HOME/proj/ohos_master" \
+            "$HOME/ohos_master"
+        do
+            if looks_like_ohos_repo_root "$xts_repo_root"; then
+                xts_extra+=(--repo-root "$xts_repo_root")
+                break
+            fi
+        done
+    fi
+
+    if [ -f "$gitcode_cfg" ]; then
+        xts_extra+=(--git-host-config "$gitcode_cfg")
+    fi
+    if explicit_hdc_path="$(get_long_flag_value "--hdc-path" "$@" 2>/dev/null)"; then
+        resolved_hdc_path="$explicit_hdc_path"
+    else
+        if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+            xts_extra+=(--hdc-path "$resolved_hdc_path")
+        fi
+    fi
+    if [ -n "${XTS_HDC_ENDPOINT:-}" ]; then
+        xts_extra+=(--hdc-endpoint "$XTS_HDC_ENDPOINT")
+    fi
+    xts_env+=(PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src")
+    xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos device")
+    xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_MODE="wrapper")
+    if hdc_lib_dir="$(detect_hdc_library_path "${resolved_hdc_path:-${HDC_PATH:-}}" 2>/dev/null)"; then
+        xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
+        xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+    fi
+    device_run_foreground env "${xts_env[@]}" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
 }
 
 is_non_loopback_ipv4() {
@@ -226,6 +446,7 @@ device - standalone device access and bridge helper
 Supported subcommands:
   help
   bridge
+  flash
 
 Roles:
   - Linux test server:
@@ -278,6 +499,7 @@ Examples:
   ohos device bridge help
   ohos device bridge package-windows --last-report
   ohos device bridge package-windows --server-host 10.0.0.10 --server-user \$USER --last-report
+  ohos device flash --firmware-component dayu200 --firmware-build-tag 20260409_180241 --firmware-date 20260409
 HELP
 }
 
@@ -337,6 +559,29 @@ Examples:
 HELP
 }
 
+print_help_device_flash() {
+    cat <<HELP
+device flash - flash a daily firmware package or a local unpacked image bundle
+
+What it runs:
+  python3 -m arkui_xts_selector --flash-daily-firmware ...
+
+Behavior:
+  - prefers a runnable `flash.py` with a matching neighboring `bin/flash.<arch>`
+  - prefers a runnable `hdc` and propagates its library path when needed
+  - auto-detects the OHOS repo root if you run the command inside a checkout
+  - accepts either daily firmware flags or a local image bundle path
+
+Examples:
+  ohos device flash --firmware-component dayu200 --firmware-build-tag 20260409_180241 --firmware-date 20260409
+  ohos device flash --flash-firmware-path /tmp/image_bundle
+  ohos device flash /tmp/image_bundle
+
+Compatibility:
+  - `ohos xts flash ...` is kept as a compatibility alias and routes here
+HELP
+}
+
 cmd_bridge() {
     local bridge_subcmd="${1:-help}"
     if [ $# -gt 0 ]; then
@@ -389,6 +634,38 @@ cmd_bridge() {
     esac
 }
 
+cmd_flash() {
+    local flash_args=("$@")
+    local selector_args=()
+    local resolved_flash_py=""
+    local resolved_hdc_path=""
+
+    case "${flash_args[0]:-}" in
+        help|--help|-h|"")
+            print_help_device_flash
+            return 0
+            ;;
+    esac
+
+    if [ ${#flash_args[@]} -gt 0 ] && [[ "${flash_args[0]}" != -* ]] \
+        && [ -e "${flash_args[0]}" ] && ! has_long_flag "--flash-firmware-path" "${flash_args[@]}"; then
+        flash_args=(--flash-firmware-path "${flash_args[0]}" "${flash_args[@]:1}")
+    fi
+
+    if ! has_long_flag "--flash-py-path" "${flash_args[@]}"; then
+        if resolved_flash_py="$(resolve_preferred_flash_py_path 2>/dev/null)"; then
+            selector_args+=(--flash-py-path "$resolved_flash_py")
+        fi
+    fi
+    if ! has_long_flag "--hdc-path" "${flash_args[@]}"; then
+        if resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+            selector_args+=(--hdc-path "$resolved_hdc_path")
+        fi
+    fi
+
+    run_xts_selector --flash-daily-firmware "${selector_args[@]}" "${flash_args[@]}"
+}
+
 subcmd="${1:-help}"
 if [ $# -gt 0 ]; then
     shift
@@ -400,6 +677,9 @@ case "$subcmd" in
         ;;
     bridge)
         cmd_bridge "$@"
+        ;;
+    flash)
+        cmd_flash "$@"
         ;;
     *)
         err "device: unknown subcommand: $subcmd"
