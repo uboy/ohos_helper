@@ -97,7 +97,7 @@ def _readme_text(
     local_run_note = ""
     if selector_report_name and aa_target_count > 0:
         local_run_note = (
-            "\n4. To run the packaged aa_test targets directly on Windows:\n"
+            "\n5. To run the packaged aa_test targets directly on Windows:\n"
             "   powershell -ExecutionPolicy Bypass -File .\\run_selected_aa_tests.ps1\n"
         )
     return f"""Windows RK3568 bridge bundle: {bridge_name}
@@ -122,13 +122,19 @@ What you need on Windows:
 
 How to use:
 
-1. Start the HDC bridge and SSH reverse tunnel:
+1. If this Windows PC already has an `hdc.exe` server or a stale bridge from an earlier run:
+   powershell -ExecutionPolicy Bypass -File .\\stop_hdc_bridge.ps1 -StopHdcServer
+
+2. Start the HDC bridge and SSH reverse tunnel:
    powershell -ExecutionPolicy Bypass -File .\\start_hdc_bridge.ps1
 
-2. Check that the local Windows HDC server sees the device:
+   The start script already stops the previously tracked bridge and restarts
+   the local HDC server on 127.0.0.1:{windows_hdc_port} by default.
+
+3. Check that the local Windows HDC server sees the device:
    powershell -ExecutionPolicy Bypass -File .\\check_local_device.ps1
 
-3. On the Linux server, run your XTS flow with:
+4. On the Linux server, run your XTS flow with:
    --hdc-endpoint 127.0.0.1:{server_hdc_port}
 {local_run_note}
 Bridge defaults:
@@ -175,7 +181,9 @@ def _start_bridge_script(config: dict[str, Any]) -> str:
   [int]$ServerSshPort = {int(config["server_ssh_port"])},
   [int]$ServerHdcPort = {int(config["server_hdc_port"])},
   [int]$WindowsHdcPort = {int(config["windows_hdc_port"])},
-  [string]$HdcPath = 'hdc.exe'
+  [string]$HdcPath = 'hdc.exe',
+  [switch]$SkipTrackedBridgeStop,
+  [switch]$SkipHdcRestart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -192,12 +200,35 @@ function Resolve-Tool([string]$Tool) {{
   throw "Unable to find $Tool. Put hdc.exe next to this script or add it to PATH."
 }}
 
+function Stop-TrackedBridgeProcesses([string]$StatePath) {{
+  if (!(Test-Path $StatePath)) {{
+    return
+  }}
+  $state = Get-Content $StatePath -Raw | ConvertFrom-Json
+  foreach ($prop in @('ssh_process_id', 'hdc_process_id')) {{
+    $pidValue = [int]($state.$prop)
+    if ($pidValue -gt 0) {{
+      Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
+    }}
+  }}
+  Remove-Item $StatePath -Force -ErrorAction SilentlyContinue
+  Write-Host 'Stopped tracked bridge processes from the previous run.'
+}}
+
+$hdcEndpoint = "127.0.0.1:$WindowsHdcPort"
+if (-not $SkipTrackedBridgeStop) {{
+  Stop-TrackedBridgeProcesses $statePath
+}}
+
 $hdc = Resolve-Tool $HdcPath
-& $hdc kill | Out-Host
-$hdcArgs = @('-s', "127.0.0.1:$WindowsHdcPort", '-m')
+if (-not $SkipHdcRestart) {{
+  Write-Host "Restarting the local HDC server on $hdcEndpoint"
+  & $hdc -s $hdcEndpoint kill | Out-Host
+}}
+$hdcArgs = @('-s', $hdcEndpoint, '-m')
 $hdcProcess = Start-Process -FilePath $hdc -ArgumentList $hdcArgs -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 2
-& $hdc -s "127.0.0.1:$WindowsHdcPort" list targets | Out-Host
+& $hdc -s $hdcEndpoint list targets | Out-Host
 
 $sshArgs = @(
   '-NT',
@@ -227,21 +258,48 @@ Write-Host "Bridge started. Linux-side HDC endpoint: 127.0.0.1:$ServerHdcPort"
 
 
 def _stop_bridge_script() -> str:
-    return """$ErrorActionPreference = 'Stop'
+    return """param(
+  [string]$HdcPath = 'hdc.exe',
+  [int]$WindowsHdcPort = 8710,
+  [switch]$StopHdcServer
+)
+
+$ErrorActionPreference = 'Stop'
 $statePath = Join-Path $PSScriptRoot '.bridge-state.json'
-if (!(Test-Path $statePath)) {
-  Write-Host 'No bridge state file found.'
-  exit 0
-}
-$state = Get-Content $statePath -Raw | ConvertFrom-Json
-foreach ($prop in @('ssh_process_id', 'hdc_process_id')) {
-  $pidValue = [int]($state.$prop)
-  if ($pidValue -gt 0) {
-    Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
+function Resolve-Tool([string]$Tool) {
+  if (Test-Path $Tool) {
+    return (Resolve-Path $Tool).Path
   }
+  $cmd = Get-Command $Tool -ErrorAction SilentlyContinue
+  if ($cmd) {
+    return $cmd.Source
+  }
+  throw "Unable to find $Tool. Put hdc.exe next to this script or add it to PATH."
 }
-Remove-Item $statePath -Force -ErrorAction SilentlyContinue
-Write-Host 'Bridge processes were stopped.'
+
+$hadState = Test-Path $statePath
+if ($hadState) {
+  $state = Get-Content $statePath -Raw | ConvertFrom-Json
+  foreach ($prop in @('ssh_process_id', 'hdc_process_id')) {
+    $pidValue = [int]($state.$prop)
+    if ($pidValue -gt 0) {
+      Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Remove-Item $statePath -Force -ErrorAction SilentlyContinue
+  Write-Host 'Bridge processes were stopped.'
+}
+
+if ($StopHdcServer) {
+  $hdc = Resolve-Tool $HdcPath
+  $hdcEndpoint = "127.0.0.1:$WindowsHdcPort"
+  Write-Host "Stopping the local HDC server on $hdcEndpoint"
+  & $hdc -s $hdcEndpoint kill | Out-Host
+}
+
+if (!$hadState -and -not $StopHdcServer) {
+  Write-Host 'No bridge state file found.'
+}
 """
 
 

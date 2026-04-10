@@ -43,6 +43,10 @@ Status legend:
     - which PC has the USB-connected device
     - which Linux host runs `ohos xts` commands
     - which commands run on Windows and which run on Linux
+ - `done` Harden remote HDC bridge restart flow
+  - stop tracked bridge processes before a restart on the Windows device host
+  - expose a clear way to stop or force-restart HDC when a user already has it running
+  - explain the recovery flow in bundle README and `ohos device bridge help`
 - `done` Interactive `ohos download` without args
   - arrow-key menu
   - `Enter` to run

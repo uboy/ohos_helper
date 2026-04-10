@@ -94,6 +94,18 @@ class OhosXtsBridgeTests(unittest.TestCase):
             readme = archive.read("README.txt").decode("utf-8")
             self.assertIn("127.0.0.1:28710", readme)
             self.assertIn("ohos xts run last --hdc-endpoint 127.0.0.1:28710", readme)
+            self.assertIn("stop_hdc_bridge.ps1 -StopHdcServer", readme)
+            self.assertIn("restarts", readme)
+
+            start_script = archive.read("start_hdc_bridge.ps1").decode("utf-8")
+            self.assertIn("Stop-TrackedBridgeProcesses", start_script)
+            self.assertIn("Restarting the local HDC server", start_script)
+            self.assertIn("& $hdc -s $hdcEndpoint kill | Out-Host", start_script)
+
+            stop_script = archive.read("stop_hdc_bridge.ps1").decode("utf-8")
+            self.assertIn("[switch]$StopHdcServer", stop_script)
+            self.assertIn("Stopping the local HDC server on $hdcEndpoint", stop_script)
+            self.assertIn("& $hdc -s $hdcEndpoint kill | Out-Host", stop_script)
 
             aa_targets = json.loads(archive.read("aa_test_targets.json").decode("utf-8"))
             self.assertEqual(len(aa_targets), 1)

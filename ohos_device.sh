@@ -261,10 +261,12 @@ Windows device host flow:
        Override them with --server-host / --server-user when needed.
   Run on the Windows PC with the USB-connected device:
     2. Unpack the ZIP bundle.
-    3. Start the bridge:
+    3. If hdc.exe or an old bridge is already running, stop it first:
+       powershell -ExecutionPolicy Bypass -File .\\stop_hdc_bridge.ps1 -StopHdcServer
+    4. Start the bridge:
        powershell -ExecutionPolicy Bypass -File .\\start_hdc_bridge.ps1
   Back on the Linux test server:
-    4. Run XTS with:
+    5. Run XTS with:
        ohos xts run last --hdc-endpoint 127.0.0.1:28710
 
   Persistent config:
@@ -321,7 +323,10 @@ Recommended flow:
   3. On the Windows device host:
      - unpack the archive
      - ensure ssh and hdc.exe are available
-     - run start_hdc_bridge.ps1
+     - if hdc.exe is already running, first run:
+       stop_hdc_bridge.ps1 -StopHdcServer
+     - then run start_hdc_bridge.ps1
+     - the start script already stops the previously tracked bridge and restarts local HDC by default
   4. Back on the Linux test server:
      ohos xts run last --hdc-endpoint 127.0.0.1:28710
 

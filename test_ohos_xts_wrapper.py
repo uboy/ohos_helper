@@ -368,6 +368,7 @@ exit 127
         self.assertIn("Windows device host:", result.stdout)
         self.assertIn("If '--server-host' is omitted", result.stdout)
         self.assertIn("ohos device bridge package-windows --last-report", result.stdout)
+        self.assertIn("stop_hdc_bridge.ps1 -StopHdcServer", result.stdout)
 
     def test_device_bridge_package_windows_auto_detects_server_host_and_user(self):
         result = run_cmd(
