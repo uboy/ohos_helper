@@ -70,12 +70,20 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "import sys\n"
                 "import time\n"
                 "from pathlib import Path\n"
+                "fake_tags = [item.strip() for item in os.environ.get('TEST_SELECTOR_FAKE_TAGS', '').split(',') if item.strip()]\n"
+                "args = sys.argv[1:]\n"
+                "if '--list-daily-tags' in args and fake_tags:\n"
+                "  tag_type = args[args.index('--list-daily-tags') + 1] if args.index('--list-daily-tags') + 1 < len(args) else 'tests'\n"
+                "  print(f'Listing {len(fake_tags)} most recent {tag_type} tags (component=fake, branch=master):')\n"
+                "  for tag in fake_tags:\n"
+                "    print(f'  {tag}')\n"
+                "  sys.exit(0)\n"
                 "sleep_seconds = float(os.environ.get('TEST_SELECTOR_SLEEP', '0') or '0')\n"
                 "if sleep_seconds > 0:\n"
                 "  time.sleep(sleep_seconds)\n"
                 "capture_path = Path(os.environ['TEST_SELECTOR_CAPTURE'])\n"
                 "capture_path.write_text(json.dumps({\n"
-                "  'argv': sys.argv[1:],\n"
+                "  'argv': args,\n"
                 "  'env': {\n"
                 "    'ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH': os.environ.get('ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH', ''),\n"
                 "    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),\n"
@@ -390,6 +398,50 @@ exit 127
         self.assertIn("Auto-detected Linux test server address: 10.55.0.9", result.stdout)
         self.assertIn("Auto-detected Linux test server user: deviceuser", result.stdout)
         self.assertIn("Run the ZIP on the Windows PC with the USB-connected device", result.stdout)
+
+    def test_download_menu_selects_sdk_and_tag_then_runs_download(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_MENU_FORCE"] = "1"
+        env["TEST_SELECTOR_FAKE_TAGS"] = "20260410_120537,20260409_120125"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+            input_text="\x1b[B\n\x1b[B\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--download-daily-sdk", argv)
+        self.assertIn("--sdk-build-tag", argv)
+        self.assertEqual(argv[argv.index("--sdk-build-tag") + 1], "20260409_120125")
+
+    def test_download_menu_escape_cancels_cleanly(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_MENU_FORCE"] = "1"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+            input_text="\x1b",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Download cancelled.", result.stdout + result.stderr)
+        self.assertFalse(self.capture_path.exists())
 
     def test_info_file_positional_mode_routes_to_file_helper(self):
         relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"

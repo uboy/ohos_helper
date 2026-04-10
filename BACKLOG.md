@@ -43,7 +43,7 @@ Status legend:
     - which PC has the USB-connected device
     - which Linux host runs `ohos xts` commands
     - which commands run on Windows and which run on Linux
-- `pending` Interactive `ohos download` without args
+- `done` Interactive `ohos download` without args
   - arrow-key menu
   - `Enter` to run
   - `Esc` to cancel
