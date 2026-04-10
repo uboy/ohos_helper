@@ -104,6 +104,6 @@ Status legend:
 
 ## Config UX
 
-- `pending` Extend `ohos npmrc`
+- `done` Extend `ohos npmrc`
   - support explicit original/default registry profile
   - keep mirror profile as a separate mode

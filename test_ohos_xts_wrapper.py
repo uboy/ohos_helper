@@ -404,6 +404,64 @@ exit 127
         self.assertIn("ohos download list-tags", result.stdout)
         self.assertNotIn("Remote device on another PC:", result.stdout)
 
+    def test_help_npmrc_mentions_profiles(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "npmrc",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos npmrc [mirror|original]", result.stdout)
+        self.assertIn("OHOS_SYNC_NPMRC_PROFILE", result.stdout)
+
+    def test_npmrc_original_profile_shows_public_registries(self):
+        env = self.env.copy()
+        env["ORIGINAL_KOALA_NPM_REGISTRY"] = "https://nexus.example/koala/"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "npmrc",
+                "original",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Generated .npmrc profile:", result.stdout)
+        self.assertIn("registry=https://repo.huaweicloud.com/repository/npm/", result.stdout)
+        self.assertIn("@ohos:registry=https://repo.harmonyos.com/npm/", result.stdout)
+        self.assertIn("@koalaui:registry=https://nexus.example/koala/", result.stdout)
+        self.assertIn("ohpm registry       : https://repo.harmonyos.com/ohpm/", result.stdout)
+
+    def test_npmrc_mirror_profile_stays_default_for_sync(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "npmrc",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Generated .npmrc profile:", result.stdout)
+        self.assertIn("mirror", result.stdout)
+        self.assertIn("uses the 'mirror' profile during sync/build", result.stdout)
+        self.assertIn("registry=http://tsnnlx12bs02.ad.telmast.com:8081/repository/huaweicloud", result.stdout)
+
     def test_xts_sdk_alias_routes_to_download_tool(self):
         env = self.env.copy()
         env["OHOS_DOWNLOAD_TOOL"] = str(self.fake_download_tool)

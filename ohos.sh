@@ -46,6 +46,12 @@ OHPM_REGISTRY="${OHPM_REGISTRY:-http://tsnnlx12bs02.ad.telmast.com:8081/reposito
 PYPI_URL="${PYPI_URL:-http://tsnnlx12bs02.ad.telmast.com:8081/repository/pypi/simple/}"
 TRUSTED_HOST="${TRUSTED_HOST:-tsnnlx12bs02.ad.telmast.com}"
 KOALA_NPM_REGISTRY="${KOALA_NPM_REGISTRY:-http://tsnnlx12bs02.ad.telmast.com:8081/repository/koala-npm/}"
+ORIGINAL_NPM_REGISTRY="${ORIGINAL_NPM_REGISTRY:-https://repo.huaweicloud.com/repository/npm/}"
+ORIGINAL_OHOS_NPM_REGISTRY="${ORIGINAL_OHOS_NPM_REGISTRY:-https://repo.harmonyos.com/npm/}"
+ORIGINAL_OHPM_REGISTRY="${ORIGINAL_OHPM_REGISTRY:-https://repo.harmonyos.com/ohpm/}"
+OHPM_PUBLISH_REGISTRY="${OHPM_PUBLISH_REGISTRY:-https://ohpm.openharmony.cn/ohpm/}"
+ORIGINAL_KOALA_NPM_REGISTRY="${ORIGINAL_KOALA_NPM_REGISTRY:-${KOALA_NPM_REGISTRY}}"
+OHOS_SYNC_NPMRC_PROFILE="${OHOS_SYNC_NPMRC_PROFILE:-mirror}"
 
 REPO_MANIFEST_URL="${REPO_MANIFEST_URL:-https://gitcode.com/openharmony/manifest.git}"
 REPO_REFERENCE="${REPO_REFERENCE:-/data/shared/ohos_mirror}"
@@ -368,20 +374,103 @@ NPMRC="$HOME/.npmrc"
 NPMRC_BAK=""
 NPMRC_PROTECTED=0
 
+normalize_npmrc_profile() {
+    case "${1:-mirror}" in
+        mirror|"")
+            printf '%s\n' "mirror"
+            ;;
+        original|default|public)
+            printf '%s\n' "original"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+sync_npmrc_profile() {
+    local profile=""
+    if ! profile="$(normalize_npmrc_profile "${OHOS_SYNC_NPMRC_PROFILE:-mirror}" 2>/dev/null)"; then
+        err "Invalid OHOS_SYNC_NPMRC_PROFILE: ${OHOS_SYNC_NPMRC_PROFILE:-}"
+        err "Supported values: mirror, original"
+        return 1
+    fi
+    printf '%s\n' "$profile"
+}
+
+registry_for_npmrc_profile() {
+    local profile="$1"
+    local kind="$2"
+    case "$profile:$kind" in
+        mirror:npm) printf '%s\n' "$NPM_REGISTRY" ;;
+        mirror:ohos) printf '%s\n' "$OHOS_NPM_REGISTRY" ;;
+        mirror:ohpm) printf '%s\n' "$OHPM_REGISTRY" ;;
+        mirror:koala) printf '%s\n' "$KOALA_NPM_REGISTRY" ;;
+        original:npm) printf '%s\n' "$ORIGINAL_NPM_REGISTRY" ;;
+        original:ohos) printf '%s\n' "$ORIGINAL_OHOS_NPM_REGISTRY" ;;
+        original:ohpm) printf '%s\n' "$ORIGINAL_OHPM_REGISTRY" ;;
+        original:koala) printf '%s\n' "$ORIGINAL_KOALA_NPM_REGISTRY" ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 generate_npmrc() {
+    local requested_profile="${1:-mirror}"
+    local profile=""
+    if ! profile="$(normalize_npmrc_profile "$requested_profile" 2>/dev/null)"; then
+        err "Unsupported npmrc profile: $requested_profile"
+        return 1
+    fi
+    local npm_registry=""
+    local ohos_registry=""
+    local koala_registry=""
+    npm_registry="$(registry_for_npmrc_profile "$profile" npm)"
+    ohos_registry="$(registry_for_npmrc_profile "$profile" ohos)"
+    koala_registry="$(registry_for_npmrc_profile "$profile" koala)"
     cat <<EOF
 fund=false
 package-lock=true
 strict-ssl=false
 lockfile=false
-registry=${NPM_REGISTRY}
-@ohos:registry=${OHOS_NPM_REGISTRY}
-@azanat:registry=${KOALA_NPM_REGISTRY}
-@koalaui:registry=${KOALA_NPM_REGISTRY}
-@arkoala:registry=${KOALA_NPM_REGISTRY}
-@panda:registry=${KOALA_NPM_REGISTRY}
-@idlizer:registry=${KOALA_NPM_REGISTRY}
+registry=${npm_registry}
+@ohos:registry=${ohos_registry}
+@azanat:registry=${koala_registry}
+@koalaui:registry=${koala_registry}
+@arkoala:registry=${koala_registry}
+@panda:registry=${koala_registry}
+@idlizer:registry=${koala_registry}
 EOF
+}
+
+print_help_npmrc() {
+    cat <<HELP
+npmrc - show generated npm registry profiles used by ohos.sh
+
+Usage:
+  ohos npmrc [mirror|original]
+
+Profiles:
+  mirror
+      Internal mirror profile. This remains the default for sync/build.
+  original
+      Public/default registries for manual npm/ohpm work without the internal mirror.
+
+Notes:
+  - The active sync/build profile is controlled by OHOS_SYNC_NPMRC_PROFILE in ${OHOS_CONF}.
+  - Public original defaults currently resolve to:
+      npm   -> ${ORIGINAL_NPM_REGISTRY}
+      @ohos -> ${ORIGINAL_OHOS_NPM_REGISTRY}
+      ohpm  -> ${ORIGINAL_OHPM_REGISTRY}
+  - Private koala scopes in the original profile use ORIGINAL_KOALA_NPM_REGISTRY.
+    If that variable is not set, they fall back to the current KOALA_NPM_REGISTRY value.
+
+Examples:
+  ohos npmrc
+  ohos npmrc mirror
+  ohos npmrc original
+HELP
 }
 
 check_stale_backup() {
@@ -403,7 +492,9 @@ check_stale_backup() {
 }
 
 protect_npmrc() {
+    local profile=""
     check_stale_backup
+    profile="$(sync_npmrc_profile)" || return 1
 
     NPMRC_BAK="$HOME/.npmrc.ohos_backup_$$"
     if [ -f "$NPMRC" ]; then
@@ -413,9 +504,9 @@ protect_npmrc() {
         NPMRC_BAK="${NPMRC_BAK}.empty"
     fi
 
-    generate_npmrc > "$NPMRC"
+    generate_npmrc "$profile" > "$NPMRC"
     NPMRC_PROTECTED=1
-    info "~/.npmrc replaced with script config (backup: ${NPMRC_BAK})"
+    info "~/.npmrc replaced with script config profile '${profile}' (backup: ${NPMRC_BAK})"
 }
 
 restore_npmrc() {
@@ -853,14 +944,16 @@ sync_stage_lfs() {
 
 sync_stage_prebuilts() {
     local rc
+    local npm_registry_for_sync=""
 
     protect_npmrc
     setup_proxy_fallback
+    npm_registry_for_sync="$(registry_for_npmrc_profile "$(sync_npmrc_profile)" npm)"
 
     LAST_STEP_LOG="$(mktemp /tmp/ohos_prebuilts_XXXXXX.log)"
     if run_logged_command "$LAST_STEP_LOG" \
         bash build/prebuilts_download.sh \
-        --npm-registry "$NPM_REGISTRY" \
+        --npm-registry "$npm_registry_for_sync" \
         --pypi-url "$PYPI_URL" \
         --trusted-host "$TRUSTED_HOST" \
         --skip-ssl; then
@@ -1186,13 +1279,40 @@ cmd_params() {
 }
 
 cmd_npmrc() {
-    echo -e "${BOLD}The script uses this .npmrc during sync/build:${NC}"
+    local requested_profile="${1:-mirror}"
+    local profile=""
+    local sync_profile=""
+    local ohpm_registry=""
+    local koala_registry=""
+
+    case "$requested_profile" in
+        help|--help|-h)
+            print_help_npmrc
+            return 0
+            ;;
+    esac
+
+    if ! profile="$(normalize_npmrc_profile "$requested_profile" 2>/dev/null)"; then
+        err "Unsupported npmrc profile: $requested_profile"
+        print_help_npmrc
+        return 1
+    fi
+    sync_profile="$(sync_npmrc_profile)" || return 1
+    ohpm_registry="$(registry_for_npmrc_profile "$profile" ohpm)"
+    koala_registry="$(registry_for_npmrc_profile "$profile" koala)"
+
+    echo -e "${BOLD}Generated .npmrc profile:${NC} ${profile}"
     echo ""
-    generate_npmrc
+    generate_npmrc "$profile"
     echo ""
-    echo -e "${CYAN}Configure your own ~/.npmrc to match if you run npm/ohpm manually.${NC}"
-    echo -e "${CYAN}During 'ohos sync' and 'ohos build', the script swaps it in automatically${NC}"
-    echo -e "${CYAN}and restores your original ~/.npmrc afterward.${NC}"
+    echo -e "${BOLD}Related registries:${NC}"
+    echo "  ohpm registry       : $ohpm_registry"
+    echo "  ohpm publish        : $OHPM_PUBLISH_REGISTRY"
+    echo "  private scopes      : $koala_registry"
+    echo ""
+    echo -e "${CYAN}The script currently uses the '${sync_profile}' profile during sync/build.${NC}"
+    echo -e "${CYAN}Override it in ${OHOS_CONF} with OHOS_SYNC_NPMRC_PROFILE=mirror|original.${NC}"
+    echo -e "${CYAN}The generated ~/.npmrc is temporary during sync/build and is restored afterward.${NC}"
 }
 
 cmd_config() {
@@ -1731,7 +1851,7 @@ Info commands:
   info <component>         Show component details; supports helper filters like --deep
   file <path-or-name>      Show which GN targets and build params include a file
   params                   Quick reference for build.sh flags
-  npmrc                    Show the temporary .npmrc used during sync/build
+  npmrc                    Show generated npm registry profiles for sync/build
   config                   Show current configuration values
   manifest-save <name>     Save current manifest to <name>.xml
   help [command]           Show general or command-specific help
@@ -1749,6 +1869,7 @@ Useful examples:
   ohos download sdk
   ohos download sdk 20260404_120537
   ohos download firmware 20260404_120244
+  ohos npmrc original
   ohos device help
   ohos feedback
   ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
@@ -1802,7 +1923,7 @@ What it runs:
   3. bash build/prebuilts_download.sh --npm-registry "$NPM_REGISTRY" --pypi-url "$PYPI_URL" --trusted-host "$TRUSTED_HOST" --skip-ssl
 
 Notes:
-  - The script swaps ~/.npmrc only for the prebuilts step and restores it after.
+  - The script swaps ~/.npmrc only for the prebuilts step, using the profile from OHOS_SYNC_NPMRC_PROFILE (default: mirror), and restores it after.
   - Proxy fallback applies only when configured.
   - If a sync stage fails, the script prints the stage name and a saved log path.
 
@@ -2188,7 +2309,8 @@ cmd_help() {
         pr) print_help_pr ;;
         xts) print_help_xts ;;
         download) print_help_download ;;
-        gc|products|parts|params|npmrc|config|manifest-save)
+        npmrc) print_help_npmrc ;;
+        gc|products|parts|params|config|manifest-save)
             print_help_overview
             ;;
         *)
