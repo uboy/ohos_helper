@@ -17,13 +17,15 @@ fi
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OHOS_HELPER="${SCRIPT_DIR}/ohos-helper.py"
+OHOS_HELPER="${OHOS_HELPER:-${SCRIPT_DIR}/ohos-helper.py}"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 CURL_WRAPPER="${SCRIPT_DIR}/ohos-curl-fallback"
 GITEE_UTIL_RUNNER="${GITEE_UTIL_RUNNER:-${SCRIPT_DIR}/gitee-util-runner.py}"
 GITEE_UTIL_DIR="${GITEE_UTIL_DIR:-${SCRIPT_DIR}/gitee_util}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
+OHOS_DEVICE_TOOL="${OHOS_DEVICE_TOOL:-${SCRIPT_DIR}/ohos_device.sh}"
+OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
@@ -89,6 +91,9 @@ NC='\033[0m'
 
 SYNC_FORCE_ENABLED=false
 LAST_STEP_LOG=""
+OHOS_ACTIVE_CHILD_PID=""
+OHOS_SIGNAL_MESSAGE_EMITTED=0
+OHOS_EXIT_CLEANUP_RAN=0
 
 info()  { echo -e "${GREEN}[ohos]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[ohos]${NC} $*"; }
@@ -97,6 +102,86 @@ err()   { echo -e "${RED}[ohos]${NC} $*" >&2; }
 has_command() {
     command -v "$1" >/dev/null 2>&1
 }
+
+ohos_cleanup_once() {
+    if [ "${OHOS_EXIT_CLEANUP_RAN:-0}" -eq 1 ]; then
+        return 0
+    fi
+    OHOS_EXIT_CLEANUP_RAN=1
+    if declare -F restore_npmrc >/dev/null 2>&1; then
+        restore_npmrc || true
+    fi
+    if declare -F cleanup_proxy_fallback >/dev/null 2>&1; then
+        cleanup_proxy_fallback || true
+    fi
+}
+
+ohos_wait_active_child() {
+    local rc=0
+
+    if [ -z "${OHOS_ACTIVE_CHILD_PID:-}" ]; then
+        return 0
+    fi
+
+    if wait "$OHOS_ACTIVE_CHILD_PID"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    OHOS_ACTIVE_CHILD_PID=""
+    return "$rc"
+}
+
+ohos_run_foreground() {
+    "$@" &
+    OHOS_ACTIVE_CHILD_PID=$!
+    ohos_wait_active_child
+}
+
+ohos_forward_signal() {
+    local signal_name="$1"
+    local pid="${OHOS_ACTIVE_CHILD_PID:-}"
+    local _attempt=0
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -s "$signal_name" "$pid" 2>/dev/null || true
+        for _attempt in 1 2 3 4 5; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                OHOS_ACTIVE_CHILD_PID=""
+                return 0
+            fi
+            sleep 0.1
+        done
+        kill -TERM "$pid" 2>/dev/null || true
+        for _attempt in 1 2 3 4 5; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                OHOS_ACTIVE_CHILD_PID=""
+                return 0
+            fi
+            sleep 0.1
+        done
+        kill -KILL "$pid" 2>/dev/null || true
+        OHOS_ACTIVE_CHILD_PID=""
+    fi
+}
+
+ohos_handle_signal() {
+    local signal_name="$1"
+    local exit_code="$2"
+    local message="$3"
+
+    if [ "${OHOS_SIGNAL_MESSAGE_EMITTED:-0}" -eq 0 ]; then
+        err "$message"
+        OHOS_SIGNAL_MESSAGE_EMITTED=1
+    fi
+    ohos_cleanup_once
+    ohos_forward_signal "$signal_name"
+    exit "$exit_code"
+}
+
+trap 'ohos_cleanup_once' EXIT
+trap 'ohos_handle_signal INT 130 "Script stopped by Ctrl+C."' INT
+trap 'ohos_handle_signal TERM 143 "Script stopped by SIGTERM."' TERM
 
 confirm_default_yes() {
     local prompt="$1"
@@ -849,7 +934,6 @@ sync_stage_prebuilts() {
     local rc
 
     protect_npmrc
-    trap 'restore_npmrc; cleanup_proxy_fallback' EXIT INT TERM
     setup_proxy_fallback
 
     LAST_STEP_LOG="$(mktemp /tmp/ohos_prebuilts_XXXXXX.log)"
@@ -866,7 +950,6 @@ sync_stage_prebuilts() {
 
     restore_npmrc || true   # failure is already reported inside restore_npmrc; don't abort the chain
     cleanup_proxy_fallback
-    trap - EXIT INT TERM
     return "$rc"
 }
 
@@ -1149,27 +1232,36 @@ cmd_manifest_save() {
 
 cmd_products() {
     require_ohos_repo
-    python3 "$OHOS_HELPER" products
+    run_ohos_helper products
 }
 
 cmd_parts() {
     require_ohos_repo
     local product="${1:?Usage: ohos parts <product-name>}"
-    python3 "$OHOS_HELPER" parts "$product"
+    run_ohos_helper parts "$product"
 }
 
 cmd_info() {
     require_ohos_repo
-    python3 "$OHOS_HELPER" info "$@"
+    local info_args=("$@")
+    if [ ${#info_args[@]} -gt 0 ] && [ "${info_args[0]}" = "file" ]; then
+        run_ohos_helper file "${info_args[@]:1}"
+        return
+    fi
+    if [ ${#info_args[@]} -gt 0 ] && [[ "${info_args[0]}" != --* ]] && [ -f "${info_args[0]}" ]; then
+        run_ohos_helper file "${info_args[@]}"
+        return
+    fi
+    run_ohos_helper info "${info_args[@]}"
 }
 
 cmd_file() {
     require_ohos_repo
-    python3 "$OHOS_HELPER" file "$@"
+    run_ohos_helper file "$@"
 }
 
 cmd_params() {
-    python3 "$OHOS_HELPER" params
+    run_ohos_helper params
 }
 
 cmd_npmrc() {
@@ -1244,6 +1336,129 @@ cmd_config() {
     echo "  xts selector repo   : $ARKUI_XTS_SELECTOR_DIR"
 }
 
+feedback_repo_url() {
+    git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true
+}
+
+feedback_clone_command() {
+    local repo_url
+    repo_url="$(feedback_repo_url)"
+    if [ -n "$repo_url" ]; then
+        printf 'git clone %s\n' "$repo_url"
+    else
+        printf 'git clone <repo-url>\n'
+    fi
+}
+
+feedback_upstream_command() {
+    local repo_url
+    repo_url="$(feedback_repo_url)"
+    if [ -n "$repo_url" ]; then
+        printf 'git remote add upstream %s\n' "$repo_url"
+    else
+        printf 'git remote add upstream <repo-url>\n'
+    fi
+}
+
+feedback_slug() {
+    local raw="${1:-feedback}"
+    local normalized
+    normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+    if [ -z "$normalized" ]; then
+        normalized="feedback"
+    fi
+    printf '%s\n' "$normalized"
+}
+
+cmd_feedback() {
+    local default_author
+    local author
+    local topic
+    local feedback_body=""
+    local line
+    local stamp
+    local host_name
+    local repo_url
+    local output_file
+
+    default_author="$(id -un 2>/dev/null || printf '%s' "${USER:-user}")"
+    repo_url="$(feedback_repo_url)"
+
+    echo -e "${BOLD}Project Feedback${NC}"
+    echo ""
+    echo "Current script directory:"
+    echo "  $SCRIPT_DIR"
+    echo ""
+    echo "Repository to clone or fork:"
+    if [ -n "$repo_url" ]; then
+        echo "  $repo_url"
+    else
+        echo "  <remote origin is not configured>"
+    fi
+    echo ""
+    echo "Clone command:"
+    echo "  $(feedback_clone_command)"
+    echo ""
+    echo "Fork + PR flow:"
+    echo "  1. Fork the repository in GitHub/GitCode."
+    echo "  2. Clone your fork."
+    echo "  3. Add upstream:"
+    echo "     $(feedback_upstream_command)"
+    echo "  4. Create a branch, commit your change, push the branch."
+    echo "  5. Open a PR from your fork branch to upstream."
+    echo ""
+    echo "You can now save a project wish or proposal."
+    echo "Finish the feedback text with a single '.' on a new line."
+    echo ""
+
+    read -r -p "Author [${default_author}]: " author
+    author="${author:-$default_author}"
+    read -r -p "Topic [general]: " topic
+    topic="${topic:-general}"
+
+    while IFS= read -r line; do
+        if [ "$line" = "." ]; then
+            break
+        fi
+        feedback_body+="${line}"$'\n'
+    done
+    feedback_body="${feedback_body%$'\n'}"
+
+    if [ -z "${feedback_body//[[:space:]]/}" ]; then
+        warn "Empty feedback; nothing was saved."
+        return 1
+    fi
+
+    mkdir -p "$OHOS_FEEDBACK_DIR"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    host_name="$(hostname 2>/dev/null || uname -n)"
+    output_file="${OHOS_FEEDBACK_DIR}/${stamp}__$(feedback_slug "$author").md"
+
+    cat > "$output_file" <<EOF
+# Project Feedback
+
+Author: $author
+Topic: $topic
+Created At (UTC): $stamp
+Host: $host_name
+Working Directory: $(pwd)
+Script Directory: $SCRIPT_DIR
+Repository URL: ${repo_url:-<not configured>}
+Suggested Clone: $(feedback_clone_command)
+Suggested Upstream: $(feedback_upstream_command)
+
+## Feedback
+
+$feedback_body
+EOF
+
+    info "Feedback saved: $output_file"
+}
+
+cmd_device() {
+    run_device_tool "$@"
+}
+
 cmd_pr() {
     require_tool_repo "gitee_util" "$GITEE_UTIL_DIR"
     if [ ! -f "$GITEE_UTIL_RUNNER" ]; then
@@ -1280,7 +1495,7 @@ cmd_pr() {
             ;;
         create-pr|create-issue|create-issue-pr|comment-pr|list-pr|show-comments)
             ensure_gitee_util_runtime
-            "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@"
+            ohos_run_foreground "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@"
             ;;
         *)
             err "pr: unknown subcommand: $subcmd"
@@ -1334,16 +1549,28 @@ run_xts_selector() {
         xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
         xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
     fi
-    env "${xts_env[@]}" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
+    ohos_run_foreground env "${xts_env[@]}" python3 -m arkui_xts_selector "${xts_extra[@]}" "$@"
 }
 
 run_xts_compare() {
     require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
-    PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_compare "$@"
+    ohos_run_foreground env PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_compare "$@"
 }
 
 run_xts_bridge_tool() {
-    python3 "$OHOS_XTS_BRIDGE_TOOL" "$@"
+    ohos_run_foreground python3 "$OHOS_XTS_BRIDGE_TOOL" "$@"
+}
+
+run_device_tool() {
+    if [ ! -f "$OHOS_DEVICE_TOOL" ]; then
+        err "Missing device tool: $OHOS_DEVICE_TOOL"
+        exit 1
+    fi
+    exec bash "$OHOS_DEVICE_TOOL" "$@"
+}
+
+run_ohos_helper() {
+    ohos_run_foreground python3 "$OHOS_HELPER" "$@"
 }
 
 # run_xts_download: like run_xts_selector but injects download root config
@@ -1575,6 +1802,16 @@ cmd_xts() {
             if [ ${#select_args[@]} -gt 0 ] && [[ "${select_args[0]}" != -* ]] && xts_is_pr_url "${select_args[0]}" \
                 && ! has_long_flag "--pr-url" "${select_args[@]}" && ! has_long_flag "--pr-number" "${select_args[@]}"; then
                 select_args=(--pr-url "${select_args[0]}" "${select_args[@]:1}")
+            elif [ ${#select_args[@]} -gt 0 ] && [[ "${select_args[0]}" != -* ]] && [ -f "${select_args[0]}" ] \
+                && ! has_long_flag "--changed-file" "${select_args[@]}" \
+                && ! has_long_flag "--changed-files-from" "${select_args[@]}" \
+                && ! has_long_flag "--symbol-query" "${select_args[@]}" \
+                && ! has_long_flag "--code-query" "${select_args[@]}" \
+                && ! has_long_flag "--pr-url" "${select_args[@]}" \
+                && ! has_long_flag "--pr-number" "${select_args[@]}" \
+                && ! has_long_flag "--from-report" "${select_args[@]}" \
+                && ! has_long_flag "--last-report" "${select_args[@]}"; then
+                select_args=(--changed-file "${select_args[0]}" "${select_args[@]:1}")
             fi
             if ! has_long_flag "--top-projects" "${select_args[@]}"; then
                 select_args+=(--top-projects 0)
@@ -1659,30 +1896,8 @@ cmd_xts() {
             run_xts_selector --flash-daily-firmware "${flash_args[@]}" "$@"
             ;;
         bridge)
-            local bridge_subcmd="${1:-help}"
-            if [ $# -gt 0 ]; then
-                shift
-            fi
-            case "$bridge_subcmd" in
-                help|--help|-h|"")
-                    print_help_xts_bridge
-                    ;;
-                package-windows)
-                    local bridge_args=("$@")
-                    if ! has_long_flag "--output" "${bridge_args[@]}" && ! has_long_flag "--output-dir" "${bridge_args[@]}" && [ -n "${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-}" ]; then
-                        bridge_args=(--output-dir "$XTS_WINDOWS_BRIDGE_OUTPUT_ROOT" "${bridge_args[@]}")
-                    fi
-                    if ! has_long_flag "--run-store-root" "${bridge_args[@]}"; then
-                        bridge_args=(--run-store-root "$(xts_default_run_store_root)" "${bridge_args[@]}")
-                    fi
-                    run_xts_bridge_tool package-windows "${bridge_args[@]}"
-                    ;;
-                *)
-                    err "xts bridge: unknown subcommand: $bridge_subcmd"
-                    print_help_xts_bridge
-                    exit 1
-                    ;;
-            esac
+            warn "xts bridge is deprecated; use 'ohos device bridge ...' instead."
+            cmd_device bridge "$@"
             ;;
         --*)
             run_xts_selector "$subcmd" "$@"
@@ -1715,6 +1930,8 @@ Chainable commands:
 
 Tool commands:
   download [subcommand]    Download daily SDK / firmware / XTS test packages
+  device [subcommand]      Device-oriented helpers: remote HDC access and bridge packaging
+  feedback                 Save project feedback / wishes next to this script
   pr [subcommand]          Wrapper around vendored gitee/gitcode PR helper
   xts [subcommand]         Wrapper around vendored arkui-xts-selector flows
 
@@ -1742,6 +1959,8 @@ Useful examples:
   ohos download sdk
   ohos download sdk 20260404_120537
   ohos download firmware 20260404_120244
+  ohos device help
+  ohos feedback
   ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
   ohos xts sdk --sdk-build-tag 20260404_120537
 
@@ -1873,6 +2092,12 @@ info - show component metadata and optional BUILD.gn deep scan
 What it runs:
   python3 "$OHOS_HELPER" info <component> [--deep] [--path-filter TEXT] [--target-filter TEXT] [--target-type TYPE] [--view grouped|tree|flat] [--max-depth N] [--describe]
 
+File-mode shortcuts:
+  - ohos info file <path-or-name>
+  - ohos info <existing-file-path>
+  These route to:
+    python3 "$OHOS_HELPER" file <path-or-name>
+
 Useful flags:
   --deep                 Scan BUILD.gn files under the component directory
   --path-filter TEXT     Keep only matching subdirectories in deep output
@@ -1887,6 +2112,8 @@ Useful flags:
 Examples:
   ohos info ace_engine
   ohos info ace_engine --deep
+  ohos info file ./foundation/arkui/ace_engine/frameworks/bridge/declarative_frontend/engine/jsi/nativeModule/arkts_native_common_bridge.cpp
+  ohos info ./foundation/arkui/ace_engine/frameworks/bridge/declarative_frontend/engine/jsi/nativeModule/arkts_native_common_bridge.cpp
   ohos info ace_engine --deep --path-filter arkts_frontend
   ohos info ace_engine --deep --target-filter native
   ohos info ace_engine --deep --view tree --max-depth 2
@@ -1963,6 +2190,57 @@ Examples:
 HELP
 }
 
+print_help_feedback() {
+    cat <<HELP
+feedback - save project wishes / proposals next to this script
+
+What it does:
+  - shows the current repository URL to clone or fork
+  - shows a short fork + PR flow
+  - prompts for author, topic, and free-form feedback text
+  - saves the note under:
+      $OHOS_FEEDBACK_DIR
+
+Input behavior:
+  - Press Enter to accept the default author/topic values.
+  - Finish the feedback text with a single '.' on a new line.
+
+Saved file format:
+  <UTC timestamp>__<author>.md
+
+Examples:
+  ohos feedback
+HELP
+}
+
+print_help_device() {
+    if [ -f "$OHOS_DEVICE_TOOL" ]; then
+        bash "$OHOS_DEVICE_TOOL" help
+        return
+    fi
+
+    cat <<HELP
+device - standalone device access and bridge helper
+
+What it runs:
+  bash "$OHOS_DEVICE_TOOL" <subcommand> [args]
+
+Supported subcommands:
+  help
+  bridge
+
+Purpose:
+  - connect to devices attached to another Linux or Windows PC
+  - package the Windows HDC bridge bundle
+  - keep device-specific setup separate from the main XTS help
+
+Examples:
+  ohos device help
+  ohos device bridge help
+  ohos device bridge package-windows --last-report
+HELP
+}
+
 print_help_xts() {
     cat <<HELP
 xts - wrapper around vendored arkui-xts-selector
@@ -1974,7 +2252,7 @@ Supported subcommands:
   select     Save a reusable selector report; accepts a raw MR URL as the first arg
   run        Execute from a saved report (ohos xts run last) or raw selector args
   compare    Compare two XTS runs by label or by result paths
-  bridge     Generate Windows helper bundles for SSH + HDC RK3568 access
+  bridge     Compatibility alias; prefer 'ohos device bridge'
   sdk        Convenience wrapper for --download-daily-sdk
   tests      Convenience wrapper for --download-daily-tests
   firmware   Convenience wrapper for --download-daily-firmware
@@ -2001,6 +2279,9 @@ Notes:
     common defaults like $HOME/proj/ohos_master.
   - If XTS_HDC_ENDPOINT is set in $OHOS_CONF, select/run flows auto-target that
     remote HDC server for generated commands and preflight.
+  - Remote device setup and bridge packaging moved to:
+      ohos device help
+      ohos device bridge help
 
 Recommended flow:
   1. Pick tests and save a reusable report:
@@ -2029,48 +2310,23 @@ Examples:
   ohos xts sdk --sdk-build-tag 20260404_120537
   ohos xts firmware --firmware-build-tag 20260404_120244
   ohos xts flash --firmware-build-tag 20260404_120244 --device <serial>
-  ohos xts bridge package-windows --server-host tsnnlx12bs01 --server-user \$USER --last-report
+  ohos device bridge package-windows --last-report
 HELP
 }
 
 print_help_xts_bridge() {
     cat <<HELP
-xts bridge - package Windows helpers for RK3568 over SSH + HDC
+xts bridge - compatibility alias for 'ohos device bridge'
 
 What it runs:
-  python3 "$OHOS_XTS_BRIDGE_TOOL" package-windows ...
+  bash "$OHOS_DEVICE_TOOL" bridge ...
 
-Purpose:
-  - Start an HDC service on a Windows PC with a USB-connected RK3568 device
-  - Open an SSH reverse tunnel back to the Linux server
-  - Optionally package a selector report as ready-to-run local aa_test commands
-
-Supported subcommands:
-  package-windows   Build a ZIP bundle with README + PowerShell bridge scripts
-
-Important defaults:
-  - Linux-side forwarded HDC port defaults to 28710
-  - Windows-side local HDC port defaults to 8710
-  - Default bundle output directory:
-      $XTS_WINDOWS_BRIDGE_OUTPUT_ROOT
-  - If you pass --last-report, the wrapper defaults run-store root to:
-      $(xts_default_run_store_root)
-
-Recommended flow:
-  1. Save the selector report on the server:
-     ohos xts select https://gitcode.com/openharmony/arkui_ace_engine/pull/83368
-  2. Build the Windows bundle:
-     ohos xts bridge package-windows --server-host <server> --server-user <user> --last-report
-  3. On Windows:
-     - unpack the archive
-     - ensure ssh and hdc.exe are available
-     - run start_hdc_bridge.ps1
-  4. Back on the Linux server:
-     ohos xts run last --hdc-endpoint 127.0.0.1:28710
+Preferred command:
+  ohos device bridge help
 
 Examples:
-  ohos xts bridge package-windows --server-host tsnnlx12bs01 --server-user dmazur --last-report
-  ohos xts bridge package-windows --server-host 10.0.0.10 --server-user user --selector-report /tmp/selector_report.json --output /tmp/rk3568_bundle.zip
+  ohos device bridge package-windows --last-report
+  ohos device bridge package-windows --server-host 10.0.0.10 --server-user user --selector-report /tmp/selector_report.json --output /tmp/rk3568_bundle.zip
 HELP
 }
 
@@ -2166,6 +2422,8 @@ cmd_help() {
         reset) print_help_reset ;;
         info) print_help_info ;;
         file) print_help_file ;;
+        device) print_help_device ;;
+        feedback) print_help_feedback ;;
         pr) print_help_pr ;;
         xts) print_help_xts ;;
         download) print_help_download ;;
@@ -2196,6 +2454,8 @@ dispatch_single_command() {
         parts) cmd_parts "$@" ;;
         info) cmd_info "$@" ;;
         file) cmd_file "$@" ;;
+        device) cmd_device "$@" ;;
+        feedback) cmd_feedback "$@" ;;
         params) cmd_params "$@" ;;
         npmrc) cmd_npmrc "$@" ;;
         config) cmd_config "$@" ;;
@@ -2251,7 +2511,7 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
-    help|--help|-h|products|parts|info|file|params|npmrc|config|manifest-save|pr|xts|download)
+    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|xts|download)
         cmd="$1"
         shift
         dispatch_single_command "$cmd" "$@"
