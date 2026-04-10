@@ -98,9 +98,17 @@ Status legend:
 
 ## Integration Work
 
-- `blocked` Integrate `Unification_docs/Dyn_Sta_XTS/run.py`
-  - current cloned source is not yet in a usable state
-  - unblock when a valid script source is available
+- `done` Integrate `Unification_docs/Dyn_Sta_XTS/run.py`
+  - adapted the Linux-friendly testcase staging logic into `ohos xts stage`
+  - wired it to `selector_report.json` / `selected_tests.json`
+  - stage output now includes:
+    - compact staged `testcases`
+    - `wanted_modules.txt`
+    - `stage_report.json`
+    - one copyable xdevice command
+  - intentionally not ported:
+    - Windows-only `msvcrt` menu code
+    - optional XML comparison server/browser helpers
 
 ## Config UX
 

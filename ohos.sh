@@ -1632,6 +1632,11 @@ run_xts_compare() {
     ohos_run_foreground env PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_compare "$@"
 }
 
+run_xts_stage() {
+    require_tool_repo "arkui-xts-selector" "$ARKUI_XTS_SELECTOR_DIR"
+    ohos_run_foreground env PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" python3 -m arkui_xts_selector.xts_stage "$@"
+}
+
 run_xts_bridge_tool() {
     ohos_run_foreground python3 "$OHOS_XTS_BRIDGE_TOOL" "$@"
 }
@@ -1760,6 +1765,28 @@ cmd_xts() {
                 run_args=(--from-report "${run_args[0]}" "${run_args[@]:1}")
             fi
             run_xts_selector --run-now "${run_args[@]}"
+            ;;
+        stage)
+            local stage_args=("$@")
+            if [ ${#stage_args[@]} -gt 0 ] && [ "${stage_args[0]}" = "last" ]; then
+                stage_args=("${stage_args[@]:1}")
+                if ! has_long_flag "--last-report" "${stage_args[@]}" \
+                    && ! has_long_flag "--from-report" "${stage_args[@]}" \
+                    && ! has_long_flag "--selected-tests-json" "${stage_args[@]}"; then
+                    stage_args=(--last-report "${stage_args[@]}")
+                fi
+            elif [ ${#stage_args[@]} -gt 0 ] && [[ "${stage_args[0]}" != -* ]] && [ -f "${stage_args[0]}" ] \
+                && ! has_long_flag "--from-report" "${stage_args[@]}" \
+                && ! has_long_flag "--last-report" "${stage_args[@]}" \
+                && ! has_long_flag "--selected-tests-json" "${stage_args[@]}"; then
+                local stage_input="${stage_args[0]}"
+                if [ "$(basename "$stage_input")" = "selected_tests.json" ]; then
+                    stage_args=(--selected-tests-json "$stage_input" "${stage_args[@]:1}")
+                else
+                    stage_args=(--from-report "$stage_input" "${stage_args[@]:1}")
+                fi
+            fi
+            run_xts_stage "${stage_args[@]}"
             ;;
         compare)
             local compare_args=("$@")
@@ -2176,6 +2203,7 @@ What it runs:
 Supported subcommands:
   select     Save a reusable selector report; accepts a raw MR URL as the first arg
   run        Execute from a saved report (ohos xts run last) or raw selector args
+  stage      Stage a compact ACTS testcase directory from a saved report
   compare    Compare two XTS runs by label or by result paths
   bridge     Compatibility alias; prefer 'ohos device bridge'
   sdk        Compatibility alias; prefer 'ohos download sdk'
@@ -2195,6 +2223,8 @@ Notes:
       --run-label <user__context>
     unless you override them explicitly.
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
+  - ohos xts stage reuses a saved selector report and writes a compact staged
+    testcases directory plus stage_report.json next to that report.
   - The daily artifact aliases now route through the dedicated download tool:
       ohos download tests
       ohos download sdk
@@ -2234,6 +2264,8 @@ Examples:
   ohos xts select --symbol-query ButtonModifier
   ohos xts --pr-url https://gitcode.com/openharmony/arkui_ace_engine/pull/82225
   ohos xts run last
+  ohos xts stage last
+  ohos xts stage /path/to/selector_report.json
   ohos xts run /path/to/selector_report.json
   ohos xts compare baseline fix
   ohos xts tests --daily-build-tag 20260404_120510

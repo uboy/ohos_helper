@@ -94,6 +94,17 @@ class OhosXtsWrapperTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        (package_dir / "xts_stage.py").write_text(
+            (
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_SELECTOR_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+            encoding="utf-8",
+        )
         self.fake_helper = self.root / "ohos-helper.py"
         write_executable(
             self.fake_helper,
@@ -363,6 +374,48 @@ exit 127
         self.assertNotIn("--pr-url", argv)
         self.assertIn("--top-projects", argv)
         self.assertIn("--run-label", argv)
+
+    def test_xts_stage_infers_report_path_from_positional_argument(self):
+        report_path = self.repo_root / "selector_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(report_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--from-report", str(report_path)])
+
+    def test_xts_stage_infers_selected_tests_json_from_positional_argument(self):
+        selected_tests_path = self.repo_root / "selected_tests.json"
+        selected_tests_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(selected_tests_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--selected-tests-json", str(selected_tests_path)])
 
     def test_feedback_saves_markdown_entry(self):
         result = run_cmd(
