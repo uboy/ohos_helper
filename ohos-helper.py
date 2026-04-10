@@ -52,6 +52,45 @@ NON_STANDALONE_TARGET_TYPES = {
     "ace_core_source_set",
     "ace_core_ng_source_set",
 }
+ASSEMBLED_ADVANCED_UI_PREFIX = "foundation/arkui/ace_engine/advanced_ui_component_static/assembled_advanced_ui_component/"
+NINJA_OUTPUT_SKIP_SUFFIXES = (".o", ".obj", ".stamp", ".rsp", ".d")
+NINJA_ARTIFACT_KIND_BY_SUFFIX = {
+    ".z.so": "shared_library",
+    ".so": "shared_library",
+    ".a": "static_library",
+    ".hap": "hap_package",
+    ".abc": "bytecode",
+    ".bin": "binary_blob",
+    ".img": "binary_image",
+}
+NINJA_BUILD_LINE_RE = re.compile(r"^build\s+(?P<outputs>.+?):\s+(?P<rule>\S+)(?:\s+(?P<inputs>.*))?$")
+MODULE_INFO_SOURCE_KEYS = {
+    "src",
+    "srcs",
+    "source",
+    "sources",
+    "source_file",
+    "source_files",
+    "input",
+    "inputs",
+}
+MODULE_INFO_OUTPUT_KEYS = {
+    "output",
+    "outputs",
+    "module_path",
+    "install_path",
+    "installed_path",
+    "artifact",
+    "artifacts",
+    "hap_path",
+    "so_path",
+    "binary",
+    "file_path",
+}
+TESTCASE_JSON_PATTERNS = [
+    os.path.join("out", "*", "suites", "acts", "**", "testcases", "*.json"),
+    os.path.join("out", "release", "suites", "acts", "testcases", "*.json"),
+]
 
 
 def section_rule(char="=", width=68):
@@ -1172,6 +1211,300 @@ def make_artifact_record(name, kind, owner_label, confidence, reason, install_di
     }
 
 
+def compact_lookup_token(value):
+    return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
+
+def iter_nested_strings(value):
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, list):
+        for item in value:
+            yield from iter_nested_strings(item)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from iter_nested_strings(item)
+
+
+def iter_mapping_keyed_strings(value, key_names):
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if key in key_names:
+                yield from iter_nested_strings(nested_value)
+            else:
+                yield from iter_mapping_keyed_strings(nested_value, key_names)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_mapping_keyed_strings(item, key_names)
+
+
+def resolve_repo_relative_token(repo_root, base_dir, token):
+    token = (token or "").strip()
+    if not token or "$" in token:
+        return ""
+    if token.startswith("//"):
+        return os.path.normpath(os.path.join(repo_root, token[2:]))
+    if os.path.isabs(token):
+        return os.path.normpath(token)
+    if token.startswith("out/"):
+        return os.path.normpath(os.path.join(repo_root, token))
+    repo_candidate = os.path.normpath(os.path.join(repo_root, token))
+    if os.path.exists(repo_candidate):
+        return repo_candidate
+    first_segment = token.split("/", 1)[0]
+    if first_segment in set(COMPONENT_ROOTS + ["test", "common", "vendor", "device", "build"]):
+        return repo_candidate
+    return os.path.normpath(os.path.join(base_dir, token))
+
+
+def infer_ninja_artifact_kind(path):
+    lower_path = path.lower()
+    for suffix, kind in NINJA_ARTIFACT_KIND_BY_SUFFIX.items():
+        if lower_path.endswith(suffix):
+            return kind
+    basename = os.path.basename(path)
+    if "." not in basename and "/" not in basename and "\\" not in basename:
+        return "executable"
+    return ""
+
+
+def iter_ninja_build_lines(build_ninja_path):
+    try:
+        with open(build_ninja_path, "r", encoding="utf-8", errors="ignore") as file_obj:
+            current = ""
+            for raw_line in file_obj:
+                line = raw_line.rstrip("\n")
+                if current:
+                    current += line.lstrip()
+                else:
+                    current = line
+                if current.endswith("$"):
+                    current = current[:-1]
+                    continue
+                stripped = current.strip()
+                if stripped.startswith("build "):
+                    yield stripped
+                current = ""
+            if current.strip().startswith("build "):
+                yield current.strip()
+    except OSError:
+        return
+
+
+def explicit_ninja_inputs(input_text):
+    inputs = []
+    for token in (input_text or "").split():
+        if token in {"|", "||"}:
+            break
+        inputs.append(token)
+    return inputs
+
+
+def resolve_ninja_token(base_dir, token):
+    token = (token or "").strip()
+    if not token:
+        return ""
+    if os.path.isabs(token):
+        return os.path.normpath(token)
+    return os.path.normpath(os.path.join(base_dir, token))
+
+
+def built_ninja_artifacts_for_file(resolved_file, repo_root, limit=20):
+    out_root = os.path.join(repo_root, "out")
+    if not os.path.isdir(out_root):
+        return []
+
+    build_ninja_files = sorted(glob.glob(os.path.join(out_root, "*", "build.ninja")))
+    rel_resolved = relpath_from(repo_root, resolved_file).replace("\\", "/")
+    artifacts = []
+
+    for build_ninja_path in build_ninja_files:
+        build_dir = os.path.dirname(build_ninja_path)
+        for line in iter_ninja_build_lines(build_ninja_path):
+            match = NINJA_BUILD_LINE_RE.match(line)
+            if not match:
+                continue
+            output_tokens = [token for token in (match.group("outputs") or "").split() if token]
+            input_tokens = explicit_ninja_inputs(match.group("inputs") or "")
+            resolved_inputs = [resolve_ninja_token(build_dir, token) for token in input_tokens]
+            input_rel_paths = [
+                relpath_from(repo_root, item).replace("\\", "/")
+                for item in resolved_inputs
+                if item and is_path_within(item, repo_root)
+            ]
+            if resolved_file not in resolved_inputs and rel_resolved not in input_rel_paths:
+                continue
+            for output_token in output_tokens:
+                output_path = resolve_ninja_token(build_dir, output_token)
+                output_name = os.path.basename(output_path)
+                if not output_name or output_name.endswith(NINJA_OUTPUT_SKIP_SUFFIXES):
+                    continue
+                kind = infer_ninja_artifact_kind(output_path)
+                if not kind:
+                    continue
+                record = make_artifact_record(
+                    output_name,
+                    kind,
+                    f"ninja:{relpath_from(repo_root, build_ninja_path)}",
+                    "built",
+                    "Observed in build.ninja output for a rule that consumes the resolved source file.",
+                    sort_rank=5,
+                )
+                record["observed_paths"] = [output_path]
+                artifacts.append(record)
+                if len(artifacts) >= limit:
+                    return artifacts
+    return artifacts
+
+
+def iter_module_info_records(module_info_path):
+    try:
+        with open(module_info_path, "r", encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return
+
+    if isinstance(payload, dict):
+        modules = payload.get("modules")
+        if isinstance(modules, list):
+            for index, record in enumerate(modules):
+                if isinstance(record, dict):
+                    yield f"module[{index}]", record
+            return
+        for key, value in payload.items():
+            if isinstance(value, dict):
+                yield str(key), value
+        return
+
+    if isinstance(payload, list):
+        for index, record in enumerate(payload):
+            if isinstance(record, dict):
+                yield f"module[{index}]", record
+
+
+def module_info_owner_label(module_key, record):
+    for key_name in ("label", "module_label", "gn_label", "target"):
+        value = record.get(key_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key_name in ("name", "module_name", "target_name"):
+        value = record.get(key_name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return module_key
+
+
+def module_info_output_paths(record, repo_root, base_dir):
+    seen = set()
+    for token in iter_mapping_keyed_strings(record, MODULE_INFO_OUTPUT_KEYS):
+        resolved = resolve_repo_relative_token(repo_root, base_dir, token)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        yield resolved
+
+
+def module_info_source_paths(record, repo_root, base_dir):
+    seen = set()
+    for token in iter_mapping_keyed_strings(record, MODULE_INFO_SOURCE_KEYS):
+        resolved = resolve_repo_relative_token(repo_root, base_dir, token)
+        if not resolved or resolved in seen:
+            continue
+        seen.add(resolved)
+        yield resolved
+
+
+def built_module_info_artifacts_for_file(resolved_file, repo_root, limit=20):
+    out_root = os.path.join(repo_root, "out")
+    if not os.path.isdir(out_root):
+        return []
+
+    artifacts = []
+    for module_info_path in sorted(glob.glob(os.path.join(out_root, "*", "module_info.json"))):
+        module_info_dir = os.path.dirname(module_info_path)
+        for module_key, record in iter_module_info_records(module_info_path):
+            source_paths = set(module_info_source_paths(record, repo_root, module_info_dir))
+            if resolved_file not in source_paths:
+                continue
+            owner_label = module_info_owner_label(module_key, record)
+            for output_path in module_info_output_paths(record, repo_root, module_info_dir):
+                output_name = os.path.basename(output_path)
+                if not output_name:
+                    continue
+                kind = infer_ninja_artifact_kind(output_path)
+                if not kind:
+                    continue
+                artifact = make_artifact_record(
+                    output_name,
+                    kind,
+                    owner_label,
+                    "built",
+                    "Observed in module_info.json for a built module that owns the resolved source file.",
+                    sort_rank=3,
+                )
+                artifact["observed_paths"] = [output_path]
+                artifacts.append(artifact)
+                if len(artifacts) >= limit:
+                    return artifacts
+    return artifacts
+
+
+def generated_wrapper_note_for_file(resolved_file, repo_root):
+    rel_path = relpath_from(repo_root, resolved_file).replace("\\", "/")
+    if ASSEMBLED_ADVANCED_UI_PREFIX not in rel_path:
+        return ""
+    basename = os.path.basename(resolved_file)
+    example = ""
+    prefix = "@ohos.arkui.advanced."
+    if basename.startswith(prefix) and basename.endswith(".ets"):
+        component_name = basename[len(prefix) : -len(".ets")]
+        component_slug = component_name.lower()
+        example = (
+            f"foundation/arkui/ace_engine/advanced_ui_component/"
+            f"{component_slug}/source/{component_slug}.ets"
+        )
+    return (
+        "This file is a generated assembled advanced UI ETS wrapper. "
+        "It is not the authored source owner. "
+        + (
+            f"Prefer querying the authored source, for example {example}, "
+            if example
+            else "Prefer querying the corresponding authored source under "
+            "foundation/arkui/ace_engine/advanced_ui_component/<component>/source/, "
+        )
+        + "when you need source ownership or output-artifact lookup."
+    )
+
+
+def artifact_search_summary_lines(resolved_file, repo_root, component_name):
+    out_root = os.path.join(repo_root, "out")
+    has_module_info = bool(glob.glob(os.path.join(out_root, "*", "module_info.json")))
+    has_testcase_metadata = bool(testcase_metadata_files(repo_root))
+    has_build_ninja = bool(glob.glob(os.path.join(out_root, "*", "build.ninja")))
+    rel_path = relpath_from(repo_root, resolved_file).replace("\\", "/")
+
+    lines = [
+        "Layers checked:",
+        "- direct GN source owners in the scanned BUILD.gn scope",
+        "- reverse GN dependents in the same scanned scope",
+        f"- built module metadata (out/*/module_info.json): {'available' if has_module_info else 'not available'}",
+        f"- testcase metadata (out/.../testcases/*.json): {'available' if has_testcase_metadata else 'not available'}",
+        f"- build outputs (out/*/build.ninja): {'available' if has_build_ninja else 'not available'}",
+    ]
+
+    if component_name == "ace_engine" and "/frameworks/core/components_ng/" in rel_path:
+        lines.append("- component fallback: ace NG sources may also flow into libace_compatible.z.so / libace.z.so")
+    else:
+        lines.append("- component fallback: none")
+
+    lines.append(
+        "Artifact types considered: shared libraries, static libraries, executables, hap packages, bytecode, binary images/blobs, generated outputs."
+    )
+    return lines
+
+
 def infer_direct_entry_artifacts(entry, confidence, reason):
     artifacts = []
     install_dir = extract_install_dir(entry)
@@ -1223,6 +1556,73 @@ def infer_component_fallback_artifacts(resolved_file, repo_root, component_name)
     return artifacts
 
 
+def testcase_metadata_files(repo_root):
+    files = []
+    for pattern in TESTCASE_JSON_PATTERNS:
+        files.extend(glob.glob(os.path.join(repo_root, pattern), recursive=True))
+    return sorted({os.path.normpath(path) for path in files})
+
+
+def testcase_metadata_artifacts(repo_root, candidate_tokens, limit=20):
+    if not candidate_tokens:
+        return []
+
+    artifacts = []
+    for testcase_path in testcase_metadata_files(repo_root):
+        try:
+            with open(testcase_path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+
+        testcase_tokens = set()
+        testcase_tokens.add(compact_lookup_token(os.path.splitext(os.path.basename(testcase_path))[0]))
+        driver = payload.get("driver") if isinstance(payload, dict) else None
+        if isinstance(driver, dict):
+            testcase_tokens.add(compact_lookup_token(driver.get("bundle-name", "")))
+            testcase_tokens.add(compact_lookup_token(driver.get("module-name", "")))
+
+        test_files = []
+        for kit in payload.get("kits", []) if isinstance(payload, dict) else []:
+            if not isinstance(kit, dict):
+                continue
+            for item in kit.get("test-file-name", []) or []:
+                if isinstance(item, str) and item.strip():
+                    test_files.append(item.strip())
+                    testcase_tokens.add(compact_lookup_token(os.path.splitext(os.path.basename(item.strip()))[0]))
+
+        testcase_tokens = {token for token in testcase_tokens if len(token) >= 10}
+        if not testcase_tokens:
+            continue
+
+        matched = False
+        for candidate in candidate_tokens:
+            for testcase_token in testcase_tokens:
+                if candidate in testcase_token or testcase_token in candidate:
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
+            continue
+
+        owner_label = f"testcase:{relpath_from(repo_root, testcase_path)}"
+        for test_file_name in test_files:
+            artifact = make_artifact_record(
+                os.path.basename(test_file_name),
+                "hap_package",
+                owner_label,
+                "built",
+                "Referenced by testcase metadata whose module token matches the owning GN target or artifact name.",
+                sort_rank=12,
+            )
+            artifacts.append(artifact)
+            if len(artifacts) >= limit:
+                return artifacts
+
+    return artifacts
+
+
 def find_related_targets_by_stem(entries, resolved_file):
     stem = os.path.splitext(os.path.basename(resolved_file))[0].lower()
     if not stem:
@@ -1262,6 +1662,29 @@ def observe_artifact_paths(repo_root, artifact_name, limit=5):
     return matches
 
 
+def collect_artifact_lookup_tokens(resolved_file, direct_matches, reverse_matches):
+    tokens = set()
+
+    def add_token(value):
+        token = compact_lookup_token(value)
+        if len(token) >= 10:
+            tokens.add(token)
+
+    add_token(os.path.splitext(os.path.basename(resolved_file))[0])
+    for entry in direct_matches:
+        add_token(entry.get("name", ""))
+        add_token(entry.get("output_name", ""))
+        for item in entry.get("artifact_output_names", []):
+            add_token(item)
+    for item in reverse_matches:
+        entry = item.get("entry", {})
+        add_token(entry.get("name", ""))
+        add_token(entry.get("output_name", ""))
+        for artifact_name in entry.get("artifact_output_names", []):
+            add_token(artifact_name)
+    return tokens
+
+
 def collect_file_artifacts(resolved_file, repo_root, component_name, entries, direct_matches, reverse_matches):
     artifacts = []
 
@@ -1296,6 +1719,14 @@ def collect_file_artifacts(resolved_file, repo_root, component_name, entries, di
                 )
             )
 
+    artifacts.extend(built_module_info_artifacts_for_file(resolved_file, repo_root))
+    artifacts.extend(built_ninja_artifacts_for_file(resolved_file, repo_root))
+    artifacts.extend(
+        testcase_metadata_artifacts(
+            repo_root,
+            collect_artifact_lookup_tokens(resolved_file, direct_matches, reverse_matches),
+        )
+    )
     artifacts.extend(infer_component_fallback_artifacts(resolved_file, repo_root, component_name))
 
     deduped = []
@@ -1305,16 +1736,23 @@ def collect_file_artifacts(resolved_file, repo_root, component_name, entries, di
         if key in seen:
             continue
         seen.add(key)
-        artifact["observed_paths"] = observe_artifact_paths(repo_root, artifact["name"])
+        observed_paths = list(artifact.get("observed_paths") or [])
+        if not observed_paths:
+            observed_paths = observe_artifact_paths(repo_root, artifact["name"])
+        artifact["observed_paths"] = observed_paths
         deduped.append(artifact)
 
-    confidence_order = {"direct": 0, "inferred": 1, "fallback": 2}
+    confidence_order = {"built": 0, "direct": 1, "inferred": 2, "fallback": 3}
     kind_order = {
         "shared_library": 0,
         "static_library": 1,
         "executable": 2,
-        "generated_output": 3,
-        "prebuilt_etc": 4,
+        "hap_package": 3,
+        "bytecode": 4,
+        "binary_image": 5,
+        "binary_blob": 6,
+        "generated_output": 7,
+        "prebuilt_etc": 8,
     }
     deduped.sort(
         key=lambda item: (
@@ -1446,6 +1884,14 @@ def show_file_info(file_query, repo_root):
         print("\nComponent Context:")
         print("  No enclosing bundle.json was found for this file.")
         print(f"  Scan scope: {scope_label}")
+    generated_wrapper_note = generated_wrapper_note_for_file(resolved_file, repo_root)
+    if generated_wrapper_note:
+        print("\nGenerated Wrapper Note:")
+        print(f"  {generated_wrapper_note}")
+
+    print("\nArtifact Search Summary:")
+    for line in artifact_search_summary_lines(resolved_file, repo_root, component_name):
+        print(f"  {line}")
 
     if product_matches:
         print(f"\nProducts containing component [{len(product_matches)}]:")
@@ -1459,6 +1905,9 @@ def show_file_info(file_query, repo_root):
         include_distance=True,
     )
     print_artifact_matches(artifacts)
+    if not artifacts and not os.path.isdir(os.path.join(repo_root, "out")):
+        print("\nBuilt Output Note:")
+        print("  The repo has no local out/ directory, so build.ninja-based output lookup was not available.")
 
     if bundle_data:
         print_component_param_hints(component_name, bundle_data, product_matches)
