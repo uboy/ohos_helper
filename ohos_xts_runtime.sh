@@ -115,6 +115,19 @@ hdc_help_command_works() {
     return 1
 }
 
+# Prepend the directory containing the resolved hdc binary to PATH (for selector / xdevice children).
+# If hdc is missing or invalid, prints the current PATH unchanged.
+prepend_hdc_bin_dir_to_path() {
+    local hdc_bin="${1:-}"
+    if [ -z "${hdc_bin}" ] || [ ! -f "${hdc_bin}" ]; then
+        printf '%s\n' "${PATH}"
+        return 0
+    fi
+    local dir
+    dir="$(cd "$(dirname "${hdc_bin}")" && pwd)"
+    printf '%s\n' "${dir}:${PATH}"
+}
+
 resolve_preferred_hdc_path() {
     local configured_hdc="${HDC_PATH:-}"
     local path_hdc=""

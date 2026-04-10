@@ -106,14 +106,17 @@ def run_list_tags_mode(args: argparse.Namespace) -> int:
         component = args.sdk_component
         branch = args.sdk_branch
         label = "SDK"
+        component_role = "sdk"
     elif tag_type == "firmware":
         component = args.firmware_component
         branch = args.firmware_branch
         label = "firmware"
+        component_role = "firmware"
     else:
         component = args.daily_component
         branch = args.daily_branch
         label = "XTS tests"
+        component_role = "xts"
 
     count = max(1, args.list_tags_count)
     after_date = args.list_tags_after or None
@@ -132,6 +135,7 @@ def run_list_tags_mode(args: argparse.Namespace) -> int:
             after_date=after_date,
             before_date=before_date,
             lookback_days=lookback,
+            component_role=component_role,
         )
     except Exception as exc:
         print(f"error: failed to fetch tag list: {exc}", file=sys.stderr)

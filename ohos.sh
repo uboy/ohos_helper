@@ -1620,6 +1620,10 @@ run_xts_selector() {
     xts_env+=(PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src")
     xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos xts")
     xts_env+=(ARKUI_XTS_SELECTOR_COMMAND_MODE="wrapper")
+    xts_env+=(PATH="$(prepend_hdc_bin_dir_to_path "${resolved_hdc_path:-}")")
+    if [ -n "${resolved_hdc_path:-}" ] && [ -f "${resolved_hdc_path}" ]; then
+        xts_env+=(HDC_PATH="$resolved_hdc_path")
+    fi
     if hdc_lib_dir="$(detect_hdc_library_path "${resolved_hdc_path:-${HDC_PATH:-}}" 2>/dev/null)"; then
         xts_env+=(ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH="$hdc_lib_dir")
         xts_env+=(LD_LIBRARY_PATH="$hdc_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
@@ -2242,6 +2246,13 @@ Notes:
   - Remote device setup and bridge packaging moved to:
       ohos device help
       ohos device bridge help
+  - After ``ohos xts run`` (or ``--run-now``), the human report lists ``Next Steps``
+    with ``Repeat this run`` first: a copy-paste command with the same report path,
+    devices, HDC flags, and run options. The JSON report also includes
+    ``repeat_run_command``.
+  - To avoid xdevice and run via ``hdc`` + ``aa test``, pass ``--run-tool aa_test``.
+    With ``--run-tool auto``, a remote HDC endpoint (``--hdc-endpoint`` or
+    XTS_HDC_ENDPOINT) makes the selector prefer ``aa_test`` over xdevice.
 
 Recommended flow:
   1. Pick tests and save a reusable report:
