@@ -94,7 +94,7 @@ exit 127
         self.conf_path.write_text(
             "\n".join(
                 [
-                    f'FLASH_PY_PATH="{self.root / "flash.py"}"',
+                    f'FLASH_PY_PATH="{self.root / "broken_flash.py"}"',
                     f'HDC_PATH="{self.broken_hdc}"',
                     'HDC_LIBRARY_PATH=""',
                     "",
@@ -102,7 +102,12 @@ exit 127
             ),
             encoding="utf-8",
         )
-        write_executable(self.root / "flash.py", "#!/usr/bin/env python3\n")
+        write_executable(self.root / "broken_flash.py", "#!/usr/bin/env python3\n")
+        self.working_flash_root = self.root / "bin" / "linux"
+        self.working_flash_root.mkdir(parents=True)
+        write_executable(self.working_flash_root / "flash.py", "#!/usr/bin/env python3\n")
+        (self.working_flash_root / "bin").mkdir(parents=True, exist_ok=True)
+        write_executable(self.working_flash_root / "bin" / f"flash.{os.uname().machine}", "#!/bin/bash\nexit 0\n")
 
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.hdc_lib_dir}:{self.env['PATH']}"
@@ -135,7 +140,10 @@ exit 127
         capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
         argv = capture["argv"]
         self.assertIn("--flash-daily-firmware", argv)
+        self.assertIn("--flash-py-path", argv)
         self.assertIn("--hdc-path", argv)
+        flash_index = argv.index("--flash-py-path")
+        self.assertEqual(argv[flash_index + 1], str(self.working_flash_root / "flash.py"))
         hdc_index = argv.index("--hdc-path")
         self.assertEqual(argv[hdc_index + 1], str(self.working_hdc))
         self.assertEqual(capture["env"]["ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH"], str(self.hdc_lib_dir))

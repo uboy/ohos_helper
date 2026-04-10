@@ -233,6 +233,58 @@ resolve_preferred_hdc_path() {
     return 1
 }
 
+flash_py_has_neighbor_tool() {
+    local flash_py_path="${1:-}"
+    local machine=""
+    local candidate=""
+
+    [ -n "${flash_py_path}" ] || return 1
+    [ -f "${flash_py_path}" ] || return 1
+
+    machine="$(uname -m 2>/dev/null || printf '%s' 'x86_64')"
+    candidate="$(cd "$(dirname "${flash_py_path}")" 2>/dev/null && pwd)/bin/flash.${machine}"
+    [ -f "${candidate}" ]
+}
+
+resolve_preferred_flash_py_path() {
+    local configured_flash="${FLASH_PY_PATH:-}"
+    local path_flash=""
+    local home_flash="${HOME}/bin/linux/flash.py"
+
+    if [ -n "${configured_flash}" ] && [ -f "${configured_flash}" ] && flash_py_has_neighbor_tool "${configured_flash}"; then
+        printf '%s\n' "${configured_flash}"
+        return 0
+    fi
+
+    path_flash="$(command -v flash.py 2>/dev/null || true)"
+    if [ -n "${path_flash}" ] && [ -f "${path_flash}" ] && flash_py_has_neighbor_tool "${path_flash}"; then
+        printf '%s\n' "${path_flash}"
+        return 0
+    fi
+
+    if [ -f "${home_flash}" ] && flash_py_has_neighbor_tool "${home_flash}"; then
+        printf '%s\n' "${home_flash}"
+        return 0
+    fi
+
+    if [ -n "${configured_flash}" ] && [ -f "${configured_flash}" ]; then
+        printf '%s\n' "${configured_flash}"
+        return 0
+    fi
+
+    if [ -n "${path_flash}" ] && [ -f "${path_flash}" ]; then
+        printf '%s\n' "${path_flash}"
+        return 0
+    fi
+
+    if [ -f "${home_flash}" ]; then
+        printf '%s\n' "${home_flash}"
+        return 0
+    fi
+
+    return 1
+}
+
 require_repo_initialized() {
     if ! is_repo_initialized; then
         err "Current directory has not been initialized."
@@ -1592,8 +1644,11 @@ cmd_xts() {
             ;;
         flash)
             local flash_args=()
-            if [ -n "${FLASH_PY_PATH:-}" ] && [ -f "${FLASH_PY_PATH}" ] && ! has_long_flag "--flash-py-path" "$@"; then
-                flash_args+=(--flash-py-path "$FLASH_PY_PATH")
+            if ! has_long_flag "--flash-py-path" "$@"; then
+                local resolved_flash_py=""
+                if resolved_flash_py="$(resolve_preferred_flash_py_path 2>/dev/null)"; then
+                    flash_args+=(--flash-py-path "$resolved_flash_py")
+                fi
             fi
             if ! has_long_flag "--hdc-path" "$@"; then
                 local resolved_hdc_path=""
