@@ -76,10 +76,15 @@ Status legend:
 
 ## PR And Feedback UX
 
-- `pending` Better `ohos pr` comments viewer
+- `done` Better `ohos pr` comments viewer
   - navigable console view
   - compact whitespace
   - readable formatting in a pager/TUI
+- `done` Add `ohos pr` PR info and duplicate guards
+  - remove confusing internal-tool update notes from help
+  - add a readable single-PR info command
+  - show reviewers, code owners, description, and changed files
+  - detect existing issue/PR duplicates before creating a new one
 
 ## File And Artifact Lookup
 

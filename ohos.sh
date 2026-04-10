@@ -26,6 +26,7 @@ ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-select
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 OHOS_DEVICE_TOOL="${OHOS_DEVICE_TOOL:-${SCRIPT_DIR}/ohos_device.sh}"
 OHOS_DOWNLOAD_TOOL="${OHOS_DOWNLOAD_TOOL:-${SCRIPT_DIR}/ohos_download.sh}"
+OHOS_PR_COMMENTS_VIEWER="${OHOS_PR_COMMENTS_VIEWER:-${SCRIPT_DIR}/ohos_pr_comments_view.py}"
 OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
 if [ -f "$OHOS_CONF" ]; then
@@ -1460,6 +1461,15 @@ cmd_device() {
     run_device_tool "$@"
 }
 
+run_pr_comments_viewer() {
+    local input_path="$1"
+    if [ ! -f "$OHOS_PR_COMMENTS_VIEWER" ]; then
+        cat "$input_path"
+        return 0
+    fi
+    ohos_run_foreground python3 "$OHOS_PR_COMMENTS_VIEWER" "$input_path"
+}
+
 cmd_pr() {
     require_tool_repo "gitee_util" "$GITEE_UTIL_DIR"
     if [ ! -f "$GITEE_UTIL_RUNNER" ]; then
@@ -1494,7 +1504,22 @@ cmd_pr() {
         help|--help|-h|"")
             print_help_pr
             ;;
-        create-pr|create-issue|create-issue-pr|comment-pr|list-pr|show-comments)
+        show-comments)
+            ensure_gitee_util_runtime
+            local comments_output=""
+            local comments_rc=0
+            comments_output="$(mktemp /tmp/ohos_pr_comments_XXXXXX.txt)"
+            if "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@" >"$comments_output" 2>&1; then
+                run_pr_comments_viewer "$comments_output"
+                comments_rc=$?
+            else
+                comments_rc=$?
+                cat "$comments_output" >&2
+            fi
+            rm -f "$comments_output"
+            return "$comments_rc"
+            ;;
+        create-pr|create-issue|create-issue-pr|comment-pr|list-pr)
             ensure_gitee_util_runtime
             ohos_run_foreground "$GITEE_UTIL_PYTHON" "$GITEE_UTIL_RUNNER" "${provider_args[@]}" "$subcmd" "$@"
             ;;
@@ -2052,17 +2077,19 @@ Supported subcommands:
   create-issue-pr
   comment-pr
   list-pr
+  show-pr
   show-comments
 
 Notes:
-  - The vendored tool repo lives at: $GITEE_UTIL_DIR
   - Runtime config is stored in:
       ${XDG_CONFIG_HOME:-$HOME/.config}/gitee_util/config.ini
-  - To update that tool later:
-      git -C "$GITEE_UTIL_DIR" pull --ff-only
   - Provider can be selected with --provider gitee or --provider gitcode
   - On the first real PR command, the wrapper may offer:
       python3 -m pip install --user requests tqdm prompt_toolkit beautifulsoup4 python-dateutil
+  - show-pr prints one readable PR card with description, reviewers, code owners, and changed files.
+  - show-comments is reformatted into a compact viewer.
+  - In an interactive terminal with less available, comment output opens in a pager
+    so you can navigate with arrows/PageUp/PageDown and quit with q.
 
 Examples:
   ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
@@ -2070,6 +2097,8 @@ Examples:
   ohos pr create-issue-pr --repo openharmony/arkui_ace_engine --type bug --base master
   ohos pr comment-pr --url https://gitcode.com/owner/repo/pull/123 --comment "Please rerun tests"
   ohos pr list-pr --repos openharmony/arkui_ace_engine --state open
+  ohos pr show-pr --url https://gitcode.com/owner/repo/pulls/123
+  ohos pr show-comments --url https://gitcode.com/owner/repo/pulls/123
 HELP
 }
 
