@@ -52,6 +52,9 @@ Status legend:
   - `Enter` to run
   - `Esc` to cancel
   - inline key hints
+- `done` Extract `ohos download` into a dedicated tool
+  - move download selection/help/menu logic into `ohos_download.sh`
+  - keep `ohos.sh` as a thin dispatcher for `download`
 - `done` Clean signal handling
   - `Ctrl+C`
   - `SIGTERM`

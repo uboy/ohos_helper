@@ -424,6 +424,23 @@ exit 127
         self.assertIn("--sdk-build-tag", argv)
         self.assertEqual(argv[argv.index("--sdk-build-tag") + 1], "20260409_120125")
 
+    def test_help_download_uses_extracted_tool(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("download - download daily prebuilt SDK, firmware or XTS test packages", result.stdout)
+        self.assertIn("ohos download tests 20260404_120510", result.stdout)
+
     def test_download_menu_escape_cancels_cleanly(self):
         env = self.env.copy()
         env["OHOS_DOWNLOAD_MENU_FORCE"] = "1"

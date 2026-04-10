@@ -25,6 +25,7 @@ GITEE_UTIL_DIR="${GITEE_UTIL_DIR:-${SCRIPT_DIR}/gitee_util}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 OHOS_DEVICE_TOOL="${OHOS_DEVICE_TOOL:-${SCRIPT_DIR}/ohos_device.sh}"
+OHOS_DOWNLOAD_TOOL="${OHOS_DOWNLOAD_TOOL:-${SCRIPT_DIR}/ohos_download.sh}"
 OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
 if [ -f "$OHOS_CONF" ]; then
@@ -1573,16 +1574,12 @@ run_ohos_helper() {
     ohos_run_foreground python3 "$OHOS_HELPER" "$@"
 }
 
-# run_xts_download: like run_xts_selector but injects download root config
-run_xts_download() {
-    local extra_args=()
-    if [ -n "${SDK_DOWNLOAD_ROOT:-}" ]; then
-        extra_args+=(--sdk-cache-root "$SDK_DOWNLOAD_ROOT")
+run_download_tool() {
+    if [ ! -f "$OHOS_DOWNLOAD_TOOL" ]; then
+        err "Missing download tool: $OHOS_DOWNLOAD_TOOL"
+        exit 1
     fi
-    if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
-        extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
-    fi
-    run_xts_selector "${extra_args[@]}" "$@"
+    exec bash "$OHOS_DOWNLOAD_TOOL" "$@"
 }
 
 has_long_flag() {
@@ -1681,309 +1678,8 @@ xts_default_run_label() {
     printf '%s__%s\n' "$(xts_label_fragment "$user_name")" "$(xts_label_fragment "$base")"
 }
 
-download_tag_flag_for_subcmd() {
-    case "$1" in
-        tests) printf '%s\n' "--daily-build-tag" ;;
-        sdk) printf '%s\n' "--sdk-build-tag" ;;
-        firmware) printf '%s\n' "--firmware-build-tag" ;;
-        *) return 1 ;;
-    esac
-}
-
-download_tag_label_for_subcmd() {
-    case "$1" in
-        tests) printf '%s\n' "daily test suite" ;;
-        sdk) printf '%s\n' "SDK" ;;
-        firmware) printf '%s\n' "firmware" ;;
-        *) return 1 ;;
-    esac
-}
-
-download_has_tag_arg() {
-    local tag_flag="$1"
-    shift
-    local arg
-    for arg in "$@"; do
-        if [ "$arg" = "$tag_flag" ] || [[ "$arg" == "$tag_flag="* ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-print_download_tag_hint() {
-    local subcmd="$1"
-    local label
-    label="$(download_tag_label_for_subcmd "$subcmd")" || return 0
-    echo ""
-    info "Choose one of the tags above, then download ${label} with either form:"
-    echo "  ohos download ${subcmd} <tag>"
-    echo "  ohos download ${subcmd} $(download_tag_flag_for_subcmd "$subcmd") <tag>"
-    echo ""
-    info "To inspect more tags or narrow the list:"
-    echo "  ohos download list-tags ${subcmd} --list-tags-count 20"
-    echo "  ohos download list-tags ${subcmd} --list-tags-after 20260401 --list-tags-before 20260430"
-}
-
-DOWNLOAD_MENU_RESULT=""
-DOWNLOAD_MENU_FILTERED_ARGS=()
-DOWNLOAD_MENU_TAGS=()
-
-download_menu_enabled() {
-    if [ "${OHOS_DOWNLOAD_MENU_FORCE:-0}" = "1" ]; then
-        return 0
-    fi
-    [ -t 0 ] && [ -t 1 ]
-}
-
-download_menu_select() {
-    local title="$1"
-    local -n options_ref="$2"
-    local selected=0
-    local key=""
-    local second=""
-    local third=""
-    local index=0
-
-    DOWNLOAD_MENU_RESULT=""
-    [ "${#options_ref[@]}" -gt 0 ] || return 1
-
-    while true; do
-        printf '\033[2J\033[H'
-        printf '%s\n\n' "$title"
-        for index in "${!options_ref[@]}"; do
-            if [ "$index" -eq "$selected" ]; then
-                printf '  > %s\n' "${options_ref[$index]}"
-            else
-                printf '    %s\n' "${options_ref[$index]}"
-            fi
-        done
-        printf '\nUse ↑/↓ to move, Enter to select, Esc to cancel.\n'
-
-        IFS= read -rsn1 key || return 1
-        case "$key" in
-            ""|$'\n'|$'\r')
-                DOWNLOAD_MENU_RESULT="${options_ref[$selected]}"
-                printf '\033[2J\033[H'
-                return 0
-                ;;
-            $'\x1b')
-                if IFS= read -rsn1 -t 0.05 second; then
-                    if [ "$second" = "[" ] && IFS= read -rsn1 -t 0.05 third; then
-                        case "$third" in
-                            A)
-                                if [ "$selected" -le 0 ]; then
-                                    selected=$((${#options_ref[@]} - 1))
-                                else
-                                    selected=$((selected - 1))
-                                fi
-                                ;;
-                            B)
-                                selected=$((selected + 1))
-                                if [ "$selected" -ge "${#options_ref[@]}" ]; then
-                                    selected=0
-                                fi
-                                ;;
-                            *)
-                                ;;
-                        esac
-                    else
-                        printf '\033[2J\033[H'
-                        return 130
-                    fi
-                else
-                    printf '\033[2J\033[H'
-                    return 130
-                fi
-                ;;
-            *)
-                ;;
-        esac
-    done
-}
-
-download_strip_list_args() {
-    DOWNLOAD_MENU_FILTERED_ARGS=()
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --list-tags-count|--list-tags-after|--list-tags-before|--list-tags-lookback)
-                shift
-                [ $# -gt 0 ] && shift
-                ;;
-            --list-tags-count=*|--list-tags-after=*|--list-tags-before=*|--list-tags-lookback=*)
-                shift
-                ;;
-            *)
-                DOWNLOAD_MENU_FILTERED_ARGS+=("$1")
-                shift
-                ;;
-        esac
-    done
-}
-
-download_collect_recent_tags() {
-    local subcmd="$1"
-    shift
-    local output=""
-    local trimmed=""
-    local candidate=""
-
-    DOWNLOAD_MENU_TAGS=()
-    if ! output="$(run_xts_download --list-daily-tags "$subcmd" "$@" 2>&1)"; then
-        printf '%s\n' "$output" >&2
-        return 1
-    fi
-
-    while IFS= read -r line; do
-        trimmed="${line#"${line%%[![:space:]]*}"}"
-        candidate="${trimmed%%[[:space:]]*}"
-        if [[ "$candidate" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
-            DOWNLOAD_MENU_TAGS+=("$candidate")
-        fi
-    done <<< "$output"
-
-    if [ "${#DOWNLOAD_MENU_TAGS[@]}" -eq 0 ]; then
-        printf '%s\n' "$output"
-        return 1
-    fi
-    return 0
-}
-
-download_choose_artifact_type() {
-    local options=("tests" "sdk" "firmware")
-    download_menu_select "Select artifact type to download" options
-}
-
-download_choose_tag() {
-    local subcmd="$1"
-    shift
-    local label=""
-    label="$(download_tag_label_for_subcmd "$subcmd")" || label="$subcmd"
-    if ! download_collect_recent_tags "$subcmd" "$@"; then
-        return 1
-    fi
-    download_menu_select "Select ${label} tag to download" DOWNLOAD_MENU_TAGS
-}
-
 cmd_download() {
-    local subcmd="${1:-}"
-    local tests_tag_flag="--daily-build-tag"
-    local sdk_tag_flag="--sdk-build-tag"
-    local firmware_tag_flag="--firmware-build-tag"
-    if [ $# -gt 0 ]; then
-        shift
-    fi
-
-    if [ -z "$subcmd" ]; then
-        if ! download_menu_enabled; then
-            print_help_download
-            return 0
-        fi
-        if download_choose_artifact_type; then
-            subcmd="$DOWNLOAD_MENU_RESULT"
-        else
-            local menu_rc=$?
-            if [ "$menu_rc" -eq 130 ]; then
-                info "Download cancelled."
-                return 0
-            fi
-            return "$menu_rc"
-        fi
-    fi
-
-    case "$subcmd" in
-        help|--help|-h|"")
-            print_help_download
-            ;;
-        tests)
-            local tests_args=("$@")
-            if [ ${#tests_args[@]} -gt 0 ] && [[ "${tests_args[0]}" != -* ]] && ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
-                tests_args=("$tests_tag_flag" "${tests_args[0]}" "${tests_args[@]:1}")
-            fi
-            if ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
-                if download_menu_enabled; then
-                    if download_choose_tag tests "${tests_args[@]}"; then
-                        download_strip_list_args "${tests_args[@]}"
-                        tests_args=("$tests_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
-                    else
-                        local menu_rc=$?
-                        if [ "$menu_rc" -eq 130 ]; then
-                            info "Download cancelled."
-                            return 0
-                        fi
-                        return "$menu_rc"
-                    fi
-                else
-                    run_xts_download --list-daily-tags tests "${tests_args[@]}"
-                    print_download_tag_hint tests
-                    return 0
-                fi
-            fi
-            run_xts_download --download-daily-tests "${tests_args[@]}"
-            ;;
-        sdk)
-            local sdk_args=("$@")
-            if [ ${#sdk_args[@]} -gt 0 ] && [[ "${sdk_args[0]}" != -* ]] && ! download_has_tag_arg "$sdk_tag_flag" "${sdk_args[@]}"; then
-                sdk_args=("$sdk_tag_flag" "${sdk_args[0]}" "${sdk_args[@]:1}")
-            fi
-            if ! download_has_tag_arg "$sdk_tag_flag" "${sdk_args[@]}"; then
-                if download_menu_enabled; then
-                    if download_choose_tag sdk "${sdk_args[@]}"; then
-                        download_strip_list_args "${sdk_args[@]}"
-                        sdk_args=("$sdk_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
-                    else
-                        local menu_rc=$?
-                        if [ "$menu_rc" -eq 130 ]; then
-                            info "Download cancelled."
-                            return 0
-                        fi
-                        return "$menu_rc"
-                    fi
-                else
-                    run_xts_download --list-daily-tags sdk "${sdk_args[@]}"
-                    print_download_tag_hint sdk
-                    return 0
-                fi
-            fi
-            run_xts_download --download-daily-sdk "${sdk_args[@]}"
-            ;;
-        firmware)
-            local firmware_args=("$@")
-            if [ ${#firmware_args[@]} -gt 0 ] && [[ "${firmware_args[0]}" != -* ]] && ! download_has_tag_arg "$firmware_tag_flag" "${firmware_args[@]}"; then
-                firmware_args=("$firmware_tag_flag" "${firmware_args[0]}" "${firmware_args[@]:1}")
-            fi
-            if ! download_has_tag_arg "$firmware_tag_flag" "${firmware_args[@]}"; then
-                if download_menu_enabled; then
-                    if download_choose_tag firmware "${firmware_args[@]}"; then
-                        download_strip_list_args "${firmware_args[@]}"
-                        firmware_args=("$firmware_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
-                    else
-                        local menu_rc=$?
-                        if [ "$menu_rc" -eq 130 ]; then
-                            info "Download cancelled."
-                            return 0
-                        fi
-                        return "$menu_rc"
-                    fi
-                else
-                    run_xts_download --list-daily-tags firmware "${firmware_args[@]}"
-                    print_download_tag_hint firmware
-                    return 0
-                fi
-            fi
-            run_xts_download --download-daily-firmware "${firmware_args[@]}"
-            ;;
-        list-tags)
-            local list_type="${1:-tests}"
-            if [ $# -gt 0 ]; then shift; fi
-            run_xts_download --list-daily-tags "$list_type" "$@"
-            ;;
-        *)
-            err "download: unknown subcommand: $subcmd"
-            print_help_download
-            exit 1
-            ;;
-    esac
+    run_download_tool "$@"
 }
 
 cmd_xts() {
@@ -2564,53 +2260,11 @@ HELP
 }
 
 print_help_download() {
-    cat <<HELP
-download - download daily prebuilt SDK, firmware or XTS test packages
-
-Subcommands:
-  tests [tag]    Download daily XTS test suite (full package → extracts ACTS)
-  sdk   [tag]    Download daily SDK package
-  firmware [tag] Download daily firmware image package
-  list-tags [tests|sdk|firmware]
-                 List the most recent available build tags (default: tests)
-
-Download roots (configured in ${OHOS_CONF}):
-  SDK      → $SDK_DOWNLOAD_ROOT
-  Firmware → $FIRMWARE_DOWNLOAD_ROOT
-  XTS      → /tmp/arkui_xts_selector_daily_cache  (override with --daily-cache-root)
-
-Behavior:
-  - In an interactive terminal, plain 'ohos download' opens an arrow-key menu for tests / sdk / firmware.
-  - In an interactive terminal, 'ohos download tests|sdk|firmware' without a tag opens an arrow-key menu with recent tags.
-  - Press Enter to start the selected download, or Esc to cancel the menu.
-  - 'ohos download tests' / 'ohos download sdk' / 'ohos download firmware' without a tag lists recent tags and prints the next command to run.
-  - A plain positional tag is accepted, e.g. 'ohos download firmware 20260404_120244'.
-  - Interrupted downloads are resumed automatically (HTTP Range).
-  - Archive filenames include the build tag for easy identification.
-  - Already-downloaded archives are not re-fetched unless the .part file exists.
-  - Set OHOS_DOWNLOAD_MENU_FORCE=1 to force the menu in tests or other non-TTY environments.
-
-Options for tests/sdk/firmware:
-  --daily-build-tag TAG     (or --sdk-build-tag / --firmware-build-tag)
-  --daily-branch BRANCH     default: master
-  --json                    print machine-readable JSON to stdout
-
-Options for list-tags:
-  --list-tags-count N       how many tags to show (default: 10)
-  --list-tags-after DATE    only show tags on/after DATE (YYYYMMDD)
-  --list-tags-before DATE   only show tags on/before DATE (YYYYMMDD)
-  --list-tags-lookback N    days back to search (default: 30)
-
-Examples:
-  ohos download list-tags
-  ohos download list-tags sdk
-  ohos download list-tags firmware --list-tags-count 20
-  ohos download list-tags tests --list-tags-after 20260401
-  ohos download tests 20260404_120510
-  ohos download sdk 20260404_120537
-  ohos download firmware 20260404_120244
-  ohos download firmware --firmware-build-tag 20260404_120244
-HELP
+    if [ -f "$OHOS_DOWNLOAD_TOOL" ]; then
+        bash "$OHOS_DOWNLOAD_TOOL" help
+        return
+    fi
+    err "Missing download tool: $OHOS_DOWNLOAD_TOOL"
 }
 
 cmd_help() {
