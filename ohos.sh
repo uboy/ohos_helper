@@ -19,6 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_HELPER="${OHOS_HELPER:-${SCRIPT_DIR}/ohos-helper.py}"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
+OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
 CURL_WRAPPER="${SCRIPT_DIR}/ohos-curl-fallback"
 GITEE_UTIL_RUNNER="${GITEE_UTIL_RUNNER:-${SCRIPT_DIR}/gitee-util-runner.py}"
 GITEE_UTIL_DIR="${GITEE_UTIL_DIR:-${SCRIPT_DIR}/gitee_util}"
@@ -32,6 +33,11 @@ OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_CONF"
+fi
+
+if [ -f "$OHOS_XTS_RUNTIME_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_XTS_RUNTIME_LIB"
 fi
 
 NPM_REGISTRY="${NPM_REGISTRY:-http://tsnnlx12bs02.ad.telmast.com:8081/repository/huaweicloud}"
@@ -231,93 +237,6 @@ is_repo_initialized() {
 
 is_ohos_repo() {
     [[ -d ".repo" ]] && [[ -f "build/prebuilts_download.sh" ]]
-}
-
-looks_like_ohos_repo_root() {
-    local candidate="${1:-}"
-    [ -n "$candidate" ] || return 1
-    [[ -d "$candidate/.repo" ]] && [[ -f "$candidate/build/prebuilts_download.sh" ]]
-}
-
-detect_hdc_library_path() {
-    local hdc_path="${1:-${HDC_PATH:-}}"
-    local hdc_dir=""
-    local candidate
-
-    if [ -n "${HDC_LIBRARY_PATH:-}" ] && [ -d "${HDC_LIBRARY_PATH}" ]; then
-        printf '%s\n' "${HDC_LIBRARY_PATH}"
-        return 0
-    fi
-
-    if [ -z "${hdc_path}" ] || [ ! -f "${hdc_path}" ]; then
-        return 1
-    fi
-
-    hdc_dir="$(cd "$(dirname "${hdc_path}")" && pwd)"
-    for candidate in \
-        "${hdc_dir}" \
-        "${hdc_dir}/lib" \
-        "${hdc_dir}/../lib" \
-        "${hdc_dir}/lib64" \
-        "${hdc_dir}/../lib64" \
-        "$HOME/proj/command-line-tools/sdk"/*/openharmony/toolchains \
-        "$HOME/command-line-tools/sdk"/*/openharmony/toolchains
-    do
-        if [ -d "$candidate" ] && [ -f "$candidate/libusb_shared.so" ]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-hdc_help_command_works() {
-    local hdc_path="${1:-}"
-    local hdc_lib_dir=""
-
-    [ -n "${hdc_path}" ] || return 1
-    [ -f "${hdc_path}" ] || return 1
-
-    if timeout 5s "${hdc_path}" -h >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if hdc_lib_dir="$(detect_hdc_library_path "${hdc_path}" 2>/dev/null)"; then
-        timeout 5s env \
-            LD_LIBRARY_PATH="${hdc_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-            "${hdc_path}" -h >/dev/null 2>&1
-        return $?
-    fi
-
-    return 1
-}
-
-resolve_preferred_hdc_path() {
-    local configured_hdc="${HDC_PATH:-}"
-    local path_hdc=""
-
-    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ] && hdc_help_command_works "${configured_hdc}"; then
-        printf '%s\n' "${configured_hdc}"
-        return 0
-    fi
-
-    path_hdc="$(command -v hdc 2>/dev/null || true)"
-    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ] && hdc_help_command_works "${path_hdc}"; then
-        printf '%s\n' "${path_hdc}"
-        return 0
-    fi
-
-    if [ -n "${configured_hdc}" ] && [ -f "${configured_hdc}" ]; then
-        printf '%s\n' "${configured_hdc}"
-        return 0
-    fi
-
-    if [ -n "${path_hdc}" ] && [ -f "${path_hdc}" ]; then
-        printf '%s\n' "${path_hdc}"
-        return 0
-    fi
-
-    return 1
 }
 
 flash_py_has_neighbor_tool() {
@@ -1607,50 +1526,6 @@ run_download_tool() {
     exec bash "$OHOS_DOWNLOAD_TOOL" "$@"
 }
 
-has_long_flag() {
-    local wanted="$1"
-    shift || true
-    local arg
-    for arg in "$@"; do
-        if [ "$arg" = "$wanted" ]; then
-            return 0
-        fi
-        case "$arg" in
-            "${wanted}"=*)
-                return 0
-                ;;
-        esac
-    done
-    return 1
-}
-
-get_long_flag_value() {
-    local wanted="$1"
-    shift || true
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            "${wanted}")
-                shift || true
-                if [ $# -gt 0 ]; then
-                    printf '%s\n' "$1"
-                    return 0
-                fi
-                return 1
-                ;;
-            "${wanted}"=*)
-                printf '%s\n' "${1#*=}"
-                return 0
-                ;;
-        esac
-        shift || true
-    done
-    return 1
-}
-
-xts_default_run_store_root() {
-    printf '%s\n' "${ARKUI_XTS_SELECTOR_DIR}/.runs"
-}
-
 xts_is_pr_url() {
     local value="${1:-}"
     [[ "$value" =~ ^https?://[^[:space:]]+/(pull|merge_requests)/[0-9]+/?$ ]]
@@ -1791,13 +1666,20 @@ cmd_xts() {
             run_xts_compare "${compare_args[@]}"
             ;;
         sdk)
-            run_xts_selector --download-daily-sdk "$@"
+            warn "xts sdk is a compatibility alias; use 'ohos download sdk ...' instead."
+            cmd_download sdk "$@"
             ;;
         tests)
-            run_xts_selector --download-daily-tests "$@"
+            warn "xts tests is a compatibility alias; use 'ohos download tests ...' instead."
+            cmd_download tests "$@"
             ;;
         firmware)
-            run_xts_selector --download-daily-firmware "$@"
+            warn "xts firmware is a compatibility alias; use 'ohos download firmware ...' instead."
+            cmd_download firmware "$@"
+            ;;
+        list-tags)
+            warn "xts list-tags is a compatibility alias; use 'ohos download list-tags ...' instead."
+            cmd_download list-tags "$@"
             ;;
         flash)
             warn "xts flash is deprecated; use 'ohos device flash ...' instead."
@@ -2165,9 +2047,10 @@ Supported subcommands:
   run        Execute from a saved report (ohos xts run last) or raw selector args
   compare    Compare two XTS runs by label or by result paths
   bridge     Compatibility alias; prefer 'ohos device bridge'
-  sdk        Convenience wrapper for --download-daily-sdk
-  tests      Convenience wrapper for --download-daily-tests
-  firmware   Convenience wrapper for --download-daily-firmware
+  sdk        Compatibility alias; prefer 'ohos download sdk'
+  tests      Compatibility alias; prefer 'ohos download tests'
+  firmware   Compatibility alias; prefer 'ohos download firmware'
+  list-tags  Compatibility alias; prefer 'ohos download list-tags'
   flash      Compatibility alias; prefer 'ohos device flash'
 
 Notes:
@@ -2181,6 +2064,11 @@ Notes:
       --run-label <user__context>
     unless you override them explicitly.
   - ohos xts run last reuses the latest saved selector report instead of rescoring the PR.
+  - The daily artifact aliases now route through the dedicated download tool:
+      ohos download tests
+      ohos download sdk
+      ohos download firmware
+      ohos download list-tags
   - 'ohos xts flash' is a compatibility alias to 'ohos device flash'.
   - If HDC needs extra shared libraries such as libusb_shared.so, set
     HDC_LIBRARY_PATH in $OHOS_CONF or let the wrapper auto-detect a common
@@ -2220,6 +2108,7 @@ Examples:
   ohos xts tests --daily-build-tag 20260404_120510
   ohos xts sdk --sdk-build-tag 20260404_120537
   ohos xts firmware --firmware-build-tag 20260404_120244
+  ohos xts list-tags firmware --list-tags-count 10
   ohos xts flash --firmware-build-tag 20260404_120244 --device <serial>
   ohos device bridge package-windows --last-report
 HELP

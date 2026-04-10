@@ -63,6 +63,7 @@ class OhosXtsWrapperTests(unittest.TestCase):
         self.capture_path = self.root / "selector_capture.json"
         self.helper_capture_path = self.root / "helper_capture.json"
         self.bridge_capture_path = self.root / "bridge_capture.json"
+        self.download_capture_path = self.root / "download_capture.json"
         (package_dir / "__main__.py").write_text(
             (
                 "import json\n"
@@ -120,6 +121,18 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "  time.sleep(sleep_seconds)\n"
                 "capture_path = Path(os.environ['TEST_BRIDGE_CAPTURE'])\n"
                 "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_download_tool = self.root / "ohos_download.sh"
+        write_executable(
+            self.fake_download_tool,
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['TEST_DOWNLOAD_CAPTURE']).write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+                "PY\n"
             ),
         )
 
@@ -202,6 +215,7 @@ exit 127
         self.env["TEST_HELPER_CAPTURE"] = str(self.helper_capture_path)
         self.env["OHOS_XTS_BRIDGE_TOOL"] = str(self.fake_bridge_tool)
         self.env["TEST_BRIDGE_CAPTURE"] = str(self.bridge_capture_path)
+        self.env["TEST_DOWNLOAD_CAPTURE"] = str(self.download_capture_path)
         self.env["USER"] = "deviceuser"
 
     def run_and_signal(self, cmd, env, sig):
@@ -357,7 +371,55 @@ exit 127
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ohos device help", result.stdout)
         self.assertIn("ohos device bridge help", result.stdout)
+        self.assertIn("ohos download list-tags", result.stdout)
         self.assertNotIn("Remote device on another PC:", result.stdout)
+
+    def test_xts_sdk_alias_routes_to_download_tool(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_TOOL"] = str(self.fake_download_tool)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "sdk",
+                "--sdk-build-tag",
+                "20260410_120125",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.download_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["sdk", "--sdk-build-tag", "20260410_120125"])
+        self.assertIn("compatibility alias", result.stdout + result.stderr)
+
+    def test_xts_list_tags_alias_routes_to_download_tool(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_TOOL"] = str(self.fake_download_tool)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "list-tags",
+                "firmware",
+                "--list-tags-count",
+                "10",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.download_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["list-tags", "firmware", "--list-tags-count", "10"])
+        self.assertIn("compatibility alias", result.stdout + result.stderr)
 
     def test_help_device_documents_remote_device_access(self):
         result = run_cmd(

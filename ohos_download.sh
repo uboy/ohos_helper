@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
+OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
 SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
 FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
@@ -22,6 +23,11 @@ OHOS_DOWNLOAD_SIGNAL_MESSAGE_EMITTED=0
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_CONF"
+fi
+
+if [ -f "$OHOS_XTS_RUNTIME_LIB" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_XTS_RUNTIME_LIB"
 fi
 
 SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
@@ -130,23 +136,6 @@ run_xts_selector_download() {
         PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" \
         ARKUI_XTS_SELECTOR_COMMAND_PREFIX="ohos download" \
         python3 -m arkui_xts_selector "${extra_args[@]}" "$@"
-}
-
-has_long_flag() {
-    local wanted="$1"
-    shift || true
-    local arg=""
-    for arg in "$@"; do
-        if [ "$arg" = "$wanted" ]; then
-            return 0
-        fi
-        case "$arg" in
-            "${wanted}"=*)
-                return 0
-                ;;
-        esac
-    done
-    return 1
 }
 
 download_tag_flag_for_subcmd() {

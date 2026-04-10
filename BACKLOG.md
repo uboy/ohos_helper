@@ -63,7 +63,7 @@ Status legend:
   - `SIGTERM`
   - clear “script stopped” message
   - consistent cleanup
-- `pending` Continue device/tool extraction
+- `active` Continue device/tool extraction
   - move download/flash/device-prep logic out of selector-heavy code paths
   - keep selector focused on ranking, report, compare, and run-store
 
