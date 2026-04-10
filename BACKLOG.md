@@ -67,6 +67,13 @@ Status legend:
   - move download/flash/device-prep logic out of selector-heavy code paths
   - keep selector focused on ranking, report, compare, and run-store
 
+## Runtime Hygiene
+
+- `done` Centralize runtime artifacts under a dedicated directory
+  - move ad-hoc selector reports and `*_tests_to_run.json` files out of the repo root
+  - ignore the runtime directory in git
+  - document that runtime outputs belong there
+
 ## PR And Feedback UX
 
 - `pending` Better `ohos pr` comments viewer

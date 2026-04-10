@@ -86,4 +86,6 @@ The following are usually runtime outputs, not project deliverables:
 - ad-hoc `*_tests_to_run.json`
 - ad-hoc diagnostic logs
 
+Default location for such files in this repo: [`.runtime/`](/data/shared/common/scripts/.runtime/README.md)
+
 Keep them out of commits unless the task explicitly asks for checked-in fixtures.
