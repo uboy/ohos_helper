@@ -38,7 +38,38 @@ class OhosXtsWrapperTests(unittest.TestCase):
         self.repo_root.mkdir()
         (self.repo_root / ".repo").mkdir()
         (self.repo_root / "build").mkdir()
-        write_executable(self.repo_root / "build" / "prebuilts_download.sh", "#!/bin/bash\nexit 0\n")
+        write_executable(
+            self.repo_root / "build" / "prebuilts_download.sh",
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "capture_path = os.environ.get('TEST_PREBUILTS_CAPTURE')\n"
+                "if capture_path:\n"
+                "    Path(capture_path).write_text(json.dumps({\n"
+                "        'argv': sys.argv[1:],\n"
+                "        'oh_venv_exists': os.path.exists('oh_venv') or os.path.islink('oh_venv'),\n"
+                "    }, indent=2), encoding='utf-8')\n"
+                "PY\n"
+            ),
+        )
+        write_executable(
+            self.repo_root / "build.sh",
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "capture_path = os.environ.get('TEST_BUILD_CAPTURE')\n"
+                "if capture_path:\n"
+                "    Path(capture_path).write_text(json.dumps({\n"
+                "        'argv': sys.argv[1:],\n"
+                "        'oh_venv_exists': os.path.exists('oh_venv') or os.path.islink('oh_venv'),\n"
+                "    }, indent=2), encoding='utf-8')\n"
+                "PY\n"
+            ),
+        )
 
         self.selector_dir = self.root / "arkui-xts-selector"
         (self.selector_dir / ".git").mkdir(parents=True)
@@ -65,6 +96,9 @@ class OhosXtsWrapperTests(unittest.TestCase):
         self.bridge_capture_path = self.root / "bridge_capture.json"
         self.download_capture_path = self.root / "download_capture.json"
         self.artifacts_capture_path = self.root / "artifacts_capture.json"
+        self.prebuilts_capture_path = self.root / "prebuilts_capture.json"
+        self.build_capture_path = self.root / "build_capture.json"
+        self.unit_run_capture_path = self.root / "unit_run_capture.json"
         (package_dir / "__main__.py").write_text(
             (
                 "import json\n"
@@ -174,6 +208,19 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "}, indent=2), encoding='utf-8')\n"
             ),
         )
+        self.fake_ace_unittest_runner = self.root / "ace_unittest_run.py"
+        write_executable(
+            self.fake_ace_unittest_runner,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_UNIT_RUN_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
 
         self.hdc_lib_dir = self.root / "toolchains"
         self.hdc_lib_dir.mkdir()
@@ -194,6 +241,21 @@ case "${1:-}" in
     echo "buildmonster1"
     ;;
 esac
+""",
+        )
+        write_executable(
+            self.fake_bin_dir / "repo",
+            """#!/bin/bash
+if [ "${1:-}" = "sync" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "forall" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "manifest" ]; then
+  exit 0
+fi
+exit 0
 """,
         )
 
@@ -249,6 +311,8 @@ exit 127
         self.env["TEST_SELECTOR_CAPTURE"] = str(self.capture_path)
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         self.feedback_dir = self.root / "feedback"
+        self.shared_prebuilts_dir = self.root / "shared-prebuilts"
+        self.shared_prebuilts_dir.mkdir()
         self.env["OHOS_FEEDBACK_DIR"] = str(self.feedback_dir)
         self.env["OHOS_HELPER"] = str(self.fake_helper)
         self.env["TEST_HELPER_CAPTURE"] = str(self.helper_capture_path)
@@ -257,6 +321,11 @@ exit 127
         self.env["TEST_DOWNLOAD_CAPTURE"] = str(self.download_capture_path)
         self.env["OHOS_XTS_ARTIFACTS_TOOL"] = str(self.fake_artifacts_tool)
         self.env["TEST_ARTIFACTS_CAPTURE"] = str(self.artifacts_capture_path)
+        self.env["TEST_PREBUILTS_CAPTURE"] = str(self.prebuilts_capture_path)
+        self.env["TEST_BUILD_CAPTURE"] = str(self.build_capture_path)
+        self.env["SHARED_PREBUILTS_DIR"] = str(self.shared_prebuilts_dir)
+        self.env["OHOS_ACE_UNITTEST_RUNNER"] = str(self.fake_ace_unittest_runner)
+        self.env["TEST_UNIT_RUN_CAPTURE"] = str(self.unit_run_capture_path)
         self.env["USER"] = "deviceuser"
 
     def run_and_signal(self, cmd, env, sig):
@@ -473,6 +542,193 @@ exit 127
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("ohos npmrc [mirror|original]", result.stdout)
         self.assertIn("OHOS_SYNC_NPMRC_PROFILE", result.stdout)
+
+    def test_help_build_mentions_requested_target_examples(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "build",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "ohos build rk3568 --no-prebuilt-sdk --build-target linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build all Linux-host ace_engine unit tests.",
+            result.stdout,
+        )
+        self.assertIn(
+            "Run them afterward with: ohos run ut ace_engine_linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos fr rk3568 --no-prebuilt-sdk --build-target linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --no-prebuilt-sdk --build-target run_linux_unittest_capi",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build and immediately run the Linux CAPI ace_engine unit tests.",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --build-target ace_engine",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --build-target ace_engine_test",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build the generated aggregate ace_engine test target.",
+            result.stdout,
+        )
+        self.assertIn(
+            "it pulls the ace_engine part itself plus the ace_engine unittest and benchmark targets.",
+            result.stdout,
+        )
+        self.assertIn(
+            "--no-prebuilt-sdk skips the ohos-sdk prebuild stage.",
+            result.stdout,
+        )
+        self.assertIn(
+            "This adds --fast-rebuild and skips prepare/preloader/gn_gen",
+            result.stdout,
+        )
+        self.assertIn(
+            "Add --no-prebuilt-sdk if you want a faster local part build",
+            result.stdout,
+        )
+
+    def test_sync_prebuilts_removes_stale_repo_root_oh_venv(self):
+        stale_venv = self.repo_root / "oh_venv"
+        (stale_venv / "bin").mkdir(parents=True)
+        (stale_venv / "bin" / "python3").write_text("", encoding="utf-8")
+        (stale_venv / "pyvenv.cfg").write_text("home = /tmp/python\n", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "sync",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.prebuilts_capture_path.read_text(encoding="utf-8"))
+        self.assertFalse(capture["oh_venv_exists"])
+        self.assertFalse(stale_venv.exists())
+        self.assertIn("Removing stale temporary Python venv", result.stdout)
+
+    def test_build_removes_stale_repo_root_oh_venv_before_build_sh(self):
+        stale_venv = self.repo_root / "oh_venv"
+        (stale_venv / "bin").mkdir(parents=True)
+        (stale_venv / "bin" / "python3").write_text("", encoding="utf-8")
+        (stale_venv / "pyvenv.cfg").write_text("home = /tmp/python\n", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "build",
+                "rk3568",
+                "--build-target",
+                "ace_engine",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.build_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            capture["argv"],
+            ["--product-name", "rk3568", "--ccache", "--build-target", "ace_engine"],
+        )
+        self.assertFalse(capture["oh_venv_exists"])
+        self.assertFalse(stale_venv.exists())
+        self.assertIn("Removing stale temporary Python venv", result.stdout)
+
+    def test_help_run_documents_ace_engine_linux_unittest_wrappers(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "run",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos run ut ace_engine_capi", result.stdout)
+        self.assertIn("ohos run ut ace_engine_linux_unittest", result.stdout)
+        self.assertIn("These are local Linux-host gtest binaries", result.stdout)
+        self.assertIn("They are not XTS/device tests.", result.stdout)
+        self.assertIn("python3", result.stdout)
+        self.assertIn("--path C-API-Main", result.stdout)
+        self.assertIn("base, capi, core, core/pipeline", result.stdout)
+
+    def test_run_ut_ace_engine_capi_routes_to_runner_with_capi_path(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "run",
+                "ut",
+                "ace_engine_capi",
+                "--debug",
+                "-j",
+                "8",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.unit_run_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--path", "C-API-Main", "--debug", "-j", "8"])
+        self.assertIn("Running ace_engine Linux CAPI unit tests", result.stdout)
+
+    def test_run_ut_ace_engine_linux_unittest_routes_to_runner(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "run",
+                "ut",
+                "ace_engine_linux_unittest",
+                "-j",
+                "16",
+                "--output",
+                "out/ace_linux_ut.json",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.unit_run_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["-j", "16", "--output", "out/ace_linux_ut.json"])
+        self.assertIn("Running all ace_engine Linux-host unit tests", result.stdout)
 
     def test_npmrc_original_profile_shows_public_registries(self):
         env = self.env.copy()

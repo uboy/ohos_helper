@@ -27,6 +27,7 @@ ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-select
 OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 OHOS_DEVICE_TOOL="${OHOS_DEVICE_TOOL:-${SCRIPT_DIR}/ohos_device.sh}"
 OHOS_DOWNLOAD_TOOL="${OHOS_DOWNLOAD_TOOL:-${SCRIPT_DIR}/ohos_download.sh}"
+OHOS_ACE_UNITTEST_RUNNER="${OHOS_ACE_UNITTEST_RUNNER:-foundation/arkui/ace_engine/test/unittest/scripts/run.py}"
 OHOS_PR_COMMENTS_VIEWER="${OHOS_PR_COMMENTS_VIEWER:-${SCRIPT_DIR}/ohos_pr_comments_view.py}"
 OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
@@ -871,6 +872,39 @@ ensure_build_prereqs() {
     configure_ccache
 }
 
+repo_root_temp_venv_path() {
+    printf '%s\n' "$(pwd)/oh_venv"
+}
+
+cleanup_repo_root_temp_venv() {
+    local venv_path="oh_venv"
+    local display_path=""
+    local looks_like_venv=false
+
+    if [ ! -e "$venv_path" ] && [ ! -L "$venv_path" ]; then
+        return 0
+    fi
+
+    display_path="$(repo_root_temp_venv_path)"
+    if [ -f "$venv_path/pyvenv.cfg" ] || [ -f "$venv_path/bin/activate" ]; then
+        looks_like_venv=true
+    fi
+    if [ -e "$venv_path/bin/python3" ] || [ -L "$venv_path/bin/python3" ]; then
+        looks_like_venv=true
+    fi
+
+    if [ "$looks_like_venv" != "true" ]; then
+        warn "Repo root contains an unexpected path named oh_venv; leaving it untouched: $display_path"
+        return 0
+    fi
+
+    warn "Removing stale temporary Python venv left by OHOS prebuilts scripts: $display_path"
+    if ! rm -rf -- "$venv_path"; then
+        err "Failed to remove stale temporary Python venv: $display_path"
+        exit 1
+    fi
+}
+
 configure_ccache() {
     export CCACHE_DIR
     export CCACHE_MAXSIZE
@@ -946,6 +980,7 @@ sync_stage_prebuilts() {
     local rc
     local npm_registry_for_sync=""
 
+    cleanup_repo_root_temp_venv
     protect_npmrc
     setup_proxy_fallback
     npm_registry_for_sync="$(registry_for_npmrc_profile "$(sync_npmrc_profile)" npm)"
@@ -1225,6 +1260,7 @@ cmd_build_impl() {
         build_mode_prefix="--fast-rebuild "
     fi
 
+    cleanup_repo_root_temp_venv
     info "Building: ./build.sh ${build_mode_prefix}${build_args} $*"
     time ./build.sh "${build_mode_args[@]}" $build_args "$@"
 }
@@ -1235,6 +1271,84 @@ cmd_build() {
 
 cmd_fast_rebuild() {
     cmd_build_impl true "$@"
+}
+
+resolve_ace_unittest_runner() {
+    local runner="${OHOS_ACE_UNITTEST_RUNNER:-foundation/arkui/ace_engine/test/unittest/scripts/run.py}"
+
+    if [ -f "$runner" ]; then
+        printf '%s\n' "$runner"
+        return 0
+    fi
+
+    return 1
+}
+
+require_ace_unittest_runner() {
+    local runner=""
+
+    if ! runner="$(resolve_ace_unittest_runner)"; then
+        err "Missing ace_engine Linux unittest runner: ${OHOS_ACE_UNITTEST_RUNNER:-foundation/arkui/ace_engine/test/unittest/scripts/run.py}"
+        exit 1
+    fi
+
+    printf '%s\n' "$runner"
+}
+
+cmd_run_ut() {
+    require_ohos_repo
+
+    local target="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$target" in
+        help|--help|-h|"")
+            print_help_run
+            return 0
+            ;;
+    esac
+
+    local runner=""
+    runner="$(require_ace_unittest_runner)"
+
+    case "$target" in
+        ace_engine_capi)
+            info "Running ace_engine Linux CAPI unit tests via ${runner} --path C-API-Main $*"
+            ohos_run_foreground python3 "$runner" --path C-API-Main "$@"
+            ;;
+        ace_engine_linux_unittest)
+            info "Running all ace_engine Linux-host unit tests via ${runner} $*"
+            ohos_run_foreground python3 "$runner" "$@"
+            ;;
+        *)
+            err "run ut: unknown test alias: $target"
+            print_help_run
+            exit 1
+            ;;
+    esac
+}
+
+cmd_run() {
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_run
+            ;;
+        ut)
+            cmd_run_ut "$@"
+            ;;
+        *)
+            err "run: unknown subcommand: $subcmd"
+            print_help_run
+            exit 1
+            ;;
+    esac
 }
 
 cmd_manifest_save() {
@@ -1884,6 +1998,7 @@ Tool commands:
   device [subcommand]      Device-oriented helpers: remote HDC access and bridge packaging
   feedback                 Save project feedback / wishes next to this script
   pr [subcommand]          Wrapper around vendored gitee/gitcode PR helper
+  run [subcommand]         Local run wrappers for host-side tests and post-build actions
   xts [subcommand]         Wrapper around vendored arkui-xts-selector flows
 
 Info commands:
@@ -1912,6 +2027,7 @@ Useful examples:
   ohos download firmware 20260404_120244
   ohos npmrc original
   ohos device help
+  ohos run ut ace_engine_linux_unittest
   ohos feedback
   ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
   ohos xts sdk --sdk-build-tag 20260404_120537
@@ -2002,14 +2118,29 @@ Common aliases:
 Behavior:
   - Unknown targets are treated as product names:
       ./build.sh --product-name <target> --ccache
+  - --no-prebuilt-sdk skips the ohos-sdk prebuild stage.
+      Use it for faster local component or test builds when you do not need refreshed SDK artifacts.
   - For a quick rebuild of an already-configured tree, use:
       ohos fr <target>
+      This adds --fast-rebuild and skips prepare/preloader/gn_gen, so use it only when GN/build config did not change.
   - In a chained invocation, build should be the final command.
 
 Examples:
   ohos build
   ohos build rk3568
-  ohos fr rk3568
+  ohos build rk3568 --no-prebuilt-sdk --build-target linux_unittest
+    Build all Linux-host ace_engine unit tests.
+    Run them afterward with: ohos run ut ace_engine_linux_unittest
+  ohos fr rk3568 --no-prebuilt-sdk --build-target linux_unittest
+    Faster repeat build of the same Linux-host tests before rerunning them locally.
+  ohos build rk3568 --no-prebuilt-sdk --build-target run_linux_unittest_capi
+    Build and immediately run the Linux CAPI ace_engine unit tests.
+  ohos build rk3568 --build-target ace_engine
+    Build the ace_engine part itself.
+    Add --no-prebuilt-sdk if you want a faster local part build and do not need refreshed ohos-sdk outputs.
+  ohos build rk3568 --build-target ace_engine_test
+    Build the generated aggregate ace_engine test target.
+    In OHOS it pulls the ace_engine part itself plus the ace_engine unittest and benchmark targets.
   ohos sync build sdk-linux
   ohos build rk3568 --gn-args is_debug=true
 HELP
@@ -2034,6 +2165,47 @@ Examples:
   ohos fr rk3568
   ohos fast-rebuild rk3568 --build-target ace_engine
   ohos sync fr rk3568
+HELP
+}
+
+print_help_run() {
+    cat <<HELP
+run - wrapper for local post-build execution flows
+
+Usage:
+  ohos run ut <alias> [run.py args]
+
+Supported unit-test aliases:
+  ace_engine_capi
+      Run the built Linux CAPI subset of ace_engine unit tests.
+      This wrapper calls:
+        python3 ${OHOS_ACE_UNITTEST_RUNNER} --path C-API-Main
+      Build first with:
+        ohos build rk3568 --no-prebuilt-sdk --build-target linux_unittest_capi
+      Or build and run in one step with:
+        ohos build rk3568 --no-prebuilt-sdk --build-target run_linux_unittest_capi
+
+  ace_engine_linux_unittest
+      Run the full built ace_engine Linux-host unittest group.
+      In the OHOS repo, this group includes Linux host tests from:
+        base, capi, core, core/pipeline
+      This wrapper calls:
+        python3 ${OHOS_ACE_UNITTEST_RUNNER}
+      Build first with:
+        ohos build rk3568 --no-prebuilt-sdk --build-target linux_unittest
+
+Notes:
+  - These are local Linux-host gtest binaries under foundation/arkui/ace_engine/test/unittest.
+  - They are not XTS/device tests.
+  - The wrapper expects the test binaries to be built already.
+  - Extra runner flags are passed through to run.py, for example:
+      -j/--process, -d/--debug, -o/--output
+
+Examples:
+  ohos run ut ace_engine_capi
+  ohos run ut ace_engine_capi --debug
+  ohos run ut ace_engine_linux_unittest
+  ohos run ut ace_engine_linux_unittest -j 16 --output out/ace_linux_ut.json
 HELP
 }
 
@@ -2354,6 +2526,7 @@ cmd_help() {
         sync) print_help_sync ;;
         build) print_help_build ;;
         fr|fast-rebuild) print_help_fast_rebuild ;;
+        run) print_help_run ;;
         reset) print_help_reset ;;
         info) print_help_info ;;
         file) print_help_file ;;
@@ -2397,6 +2570,7 @@ dispatch_single_command() {
         config) cmd_config "$@" ;;
         manifest-save) cmd_manifest_save "$@" ;;
         pr) cmd_pr "$@" ;;
+        run) cmd_run "$@" ;;
         xts) cmd_xts "$@" ;;
         download) cmd_download "$@" ;;
         *)
@@ -2447,7 +2621,7 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
-    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|xts|download)
+    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|run|xts|download)
         cmd="$1"
         shift
         dispatch_single_command "$cmd" "$@"
