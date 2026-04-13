@@ -4,8 +4,6 @@
 .scratchpad/
 coordination/
 __pycache__/
-gitee_util/
-arkui-xts-selector/
 .runtime/*
 !.runtime/README.md
 arkui_xts_selector_report.json

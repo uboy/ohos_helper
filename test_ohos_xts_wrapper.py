@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -506,6 +507,7 @@ exit 127
         self.assertIn("Author: Tester", content)
         self.assertIn("Topic: XTS UX", content)
         self.assertIn("Please make select output shorter.", content)
+        self.assertIn("Suggested Clone: git clone --recurse-submodules", content)
 
     def test_help_xts_documents_remote_device_access(self):
         result = run_cmd(
@@ -524,7 +526,32 @@ exit 127
         self.assertIn("ohos device help", result.stdout)
         self.assertIn("ohos device bridge help", result.stdout)
         self.assertIn("ohos download list-tags", result.stdout)
+        self.assertIn("git submodule update --init --recursive", result.stdout)
+        self.assertNotIn('git -C "', result.stdout)
         self.assertNotIn("Remote device on another PC:", result.stdout)
+
+    def test_xts_stage_accepts_submodule_style_git_file(self):
+        shutil.rmtree(self.selector_dir / ".git")
+        (self.selector_dir / ".git").write_text("gitdir: /tmp/fake-submodule-gitdir\n", encoding="utf-8")
+        report_path = self.repo_root / "selector_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(report_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--from-report", str(report_path)])
 
     def test_help_npmrc_mentions_profiles(self):
         result = run_cmd(

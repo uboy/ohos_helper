@@ -319,9 +319,10 @@ require_ohos_repo() {
 require_tool_repo() {
     local label="$1"
     local path="$2"
-    if [ ! -d "$path/.git" ]; then
+    if [ ! -d "$path" ] || [ ! -e "$path/.git" ]; then
         err "${label} repository is not available at: $path"
-        err "Expected a nested git clone in this scripts workspace."
+        err "Expected a vendored Git checkout or submodule in this scripts workspace."
+        err "Run 'git submodule update --init --recursive' from $SCRIPT_DIR."
         exit 1
     fi
 }
@@ -1499,9 +1500,9 @@ feedback_clone_command() {
     local repo_url
     repo_url="$(feedback_repo_url)"
     if [ -n "$repo_url" ]; then
-        printf 'git clone %s\n' "$repo_url"
+        printf 'git clone --recurse-submodules %s\n' "$repo_url"
     else
-        printf 'git clone <repo-url>\n'
+        printf 'git clone --recurse-submodules <repo-url>\n'
     fi
 }
 
@@ -2390,8 +2391,10 @@ Supported subcommands:
 
 Notes:
   - The vendored tool repo lives at: $ARKUI_XTS_SELECTOR_DIR
-  - To update that tool later:
-      git -C "$ARKUI_XTS_SELECTOR_DIR" pull --ff-only
+  - After a plain clone or after pulling new superproject commits, refresh nested tools with:
+      git submodule update --init --recursive
+  - The selector is pinned by this repository; avoid pulling it independently unless
+    you intentionally plan to update the recorded submodule pointer.
   - You can also skip the wrapper subcommand and pass raw selector flags:
       ohos xts --pr-url <url>
   - ohos xts select auto-adds:
