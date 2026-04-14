@@ -28,6 +28,9 @@ OHOS_XTS_BRIDGE_TOOL="${OHOS_XTS_BRIDGE_TOOL:-${SCRIPT_DIR}/ohos_xts_bridge.py}"
 OHOS_DEVICE_TOOL="${OHOS_DEVICE_TOOL:-${SCRIPT_DIR}/ohos_device.sh}"
 OHOS_DOWNLOAD_TOOL="${OHOS_DOWNLOAD_TOOL:-${SCRIPT_DIR}/ohos_download.sh}"
 OHOS_ACE_UNITTEST_RUNNER="${OHOS_ACE_UNITTEST_RUNNER:-foundation/arkui/ace_engine/test/unittest/scripts/run.py}"
+OHOS_DEVELOPER_TEST_DIR="${OHOS_DEVELOPER_TEST_DIR:-test/testfwk/developer_test}"
+OHOS_DEVELOPER_TEST_RUNNER="${OHOS_DEVELOPER_TEST_RUNNER:-}"
+OHOS_DEVELOPER_TEST_PRODUCTFORM="${OHOS_DEVELOPER_TEST_PRODUCTFORM:-phone}"
 OHOS_PR_COMMENTS_VIEWER="${OHOS_PR_COMMENTS_VIEWER:-${SCRIPT_DIR}/ohos_pr_comments_view.py}"
 OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
@@ -1296,6 +1299,82 @@ require_ace_unittest_runner() {
     printf '%s\n' "$runner"
 }
 
+resolve_developer_test_runner() {
+    local runner="${OHOS_DEVELOPER_TEST_RUNNER:-}"
+    local framework_dir="${OHOS_DEVELOPER_TEST_DIR:-test/testfwk/developer_test}"
+    local candidate=""
+
+    if [ -n "$runner" ] && [ -f "$runner" ]; then
+        printf '%s\n' "$runner"
+        return 0
+    fi
+
+    if [ -d "$framework_dir" ] && [ -f "$framework_dir/start.sh" ]; then
+        candidate="$(cd "$framework_dir" && pwd)/start.sh"
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    return 1
+}
+
+require_developer_test_runner() {
+    local runner=""
+
+    if ! runner="$(resolve_developer_test_runner)"; then
+        err "Missing developer_test runner: ${OHOS_DEVELOPER_TEST_RUNNER:-${OHOS_DEVELOPER_TEST_DIR}/start.sh}"
+        exit 1
+    fi
+
+    printf '%s\n' "$runner"
+}
+
+developer_test_latest_summary_xml() {
+    local runner_path="${1:-}"
+    local framework_root=""
+
+    if [ -n "${OHOS_DEVELOPER_TEST_LATEST_SUMMARY:-}" ]; then
+        printf '%s\n' "${OHOS_DEVELOPER_TEST_LATEST_SUMMARY}"
+        return 0
+    fi
+
+    [ -n "$runner_path" ] || return 1
+    framework_root="$(cd "$(dirname "$runner_path")" && pwd)"
+    printf '%s\n' "${framework_root}/reports/latest/summary_report.xml"
+}
+
+print_developer_test_summary() {
+    local summary_xml="${1:-}"
+    [ -n "$summary_xml" ] || return 1
+    [ -f "$summary_xml" ] || return 1
+
+    python3 - "$summary_xml" <<'PY'
+import sys
+from pathlib import Path
+from xml.etree import ElementTree
+
+summary_path = Path(sys.argv[1])
+try:
+    root = ElementTree.parse(summary_path).getroot()
+except Exception:
+    raise SystemExit(1)
+
+tests = int(root.attrib.get("tests", 0) or 0)
+failures = int(root.attrib.get("failures", 0) or 0)
+errors = int(root.attrib.get("errors", 0) or 0)
+skipped = int(root.attrib.get("skipped", 0) or 0)
+passed = max(tests - failures - errors - skipped, 0)
+
+print("Framework Summary")
+print(f"  tests={tests}")
+print(f"  passed={passed}")
+print(f"  failures={failures}")
+print(f"  errors={errors}")
+print(f"  skipped={skipped}")
+print(f"  summary_xml={summary_path}")
+PY
+}
+
 cmd_run_ut() {
     require_ohos_repo
 
@@ -1347,6 +1426,717 @@ cmd_run() {
         *)
             err "run: unknown subcommand: $subcmd"
             print_help_run
+            exit 1
+            ;;
+    esac
+}
+
+shell_join_command() {
+    local rendered=""
+    local arg=""
+    for arg in "$@"; do
+        printf -v rendered '%s%q ' "$rendered" "$arg"
+    done
+    printf '%s\n' "${rendered% }"
+}
+
+discover_self_test_component_json() {
+    local query="${1:-.}"
+
+    python3 - "$(pwd)" "$query" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+query = sys.argv[2]
+cwd = Path.cwd().resolve()
+skip_dirs = {
+    ".git",
+    ".repo",
+    ".scratchpad",
+    ".runtime",
+    ".qwen",
+    "__pycache__",
+    "arkui-xts-selector",
+    "gitee_util",
+    "node_modules",
+    "out",
+    "prebuilts",
+}
+
+
+def read_json(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo_root))
+    except Exception:
+        return str(path)
+
+
+def iter_bundle_paths():
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [name for name in dirnames if name not in skip_dirs]
+        if "bundle.json" in filenames:
+            yield Path(dirpath) / "bundle.json"
+
+
+def collect_summary(bundle_path: Path) -> dict:
+    data = read_json(bundle_path)
+    component = data.get("component") or {}
+    build = component.get("build") or {}
+    raw_tests = build.get("test") or []
+    tests = []
+    for item in raw_tests:
+        if isinstance(item, str):
+            tests.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "target", "label"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                tests.append(value)
+                break
+
+    unique_tests = []
+    seen_tests = set()
+    framework_modules = []
+    seen_modules = set()
+    for label in tests:
+        if label in seen_tests:
+            continue
+        seen_tests.add(label)
+        unique_tests.append(label)
+        module_name = label.rsplit(":", 1)[-1].strip() if ":" in label else ""
+        if module_name and module_name not in seen_modules:
+            seen_modules.add(module_name)
+            framework_modules.append(module_name)
+
+    candidates = []
+    seen_candidates = set()
+    test_root = bundle_path.parent / "test"
+    if test_root.is_dir():
+        for config_path in sorted(test_root.rglob("config.json")):
+            try:
+                cfg = read_json(config_path)
+            except Exception:
+                continue
+            app = cfg.get("app") or {}
+            module = cfg.get("module") or {}
+            distro = module.get("distro") or {}
+            bundle_name = app.get("bundleName") or cfg.get("bundleName") or ""
+            module_name = distro.get("moduleName") or module.get("moduleName") or module.get("name") or "entry"
+            if not bundle_name:
+                continue
+            key = (bundle_name, module_name)
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            candidates.append(
+                {
+                    "bundle_name": bundle_name,
+                    "module_name": module_name,
+                    "config_rel": rel(config_path),
+                }
+            )
+
+    return {
+        "component_name": component.get("name") or data.get("name") or bundle_path.parent.name,
+        "component_subsystem": component.get("subsystem") or "",
+        "relative_root": rel(bundle_path.parent),
+        "bundle_json_rel": rel(bundle_path),
+        "test_labels": unique_tests,
+        "framework_modules": framework_modules,
+        "aa_candidates": candidates,
+    }
+
+
+def resolve_from_path(raw_query: str):
+    candidates = []
+    raw_path = Path(raw_query)
+    if raw_path.is_absolute():
+        candidates.append(raw_path.resolve())
+    else:
+        candidates.append((cwd / raw_path).resolve())
+        candidates.append((repo_root / raw_path).resolve())
+
+    repo_boundary = repo_root.resolve()
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        current = candidate if candidate.is_dir() else candidate.parent
+        while True:
+            try:
+                current.relative_to(repo_boundary)
+            except ValueError:
+                break
+            bundle_path = current / "bundle.json"
+            if bundle_path.is_file():
+                return collect_summary(bundle_path)
+            if current == repo_boundary or current.parent == current:
+                break
+            current = current.parent
+    return None
+
+
+if query == "__ALL__":
+    components = []
+    for bundle_path in iter_bundle_paths():
+        try:
+            summary = collect_summary(bundle_path)
+        except Exception:
+            continue
+        if summary["test_labels"]:
+            components.append(summary)
+    components.sort(key=lambda item: (item["component_name"], item["relative_root"]))
+    print(json.dumps({"components": components}, ensure_ascii=False))
+    raise SystemExit(0)
+
+summary = resolve_from_path(query)
+if summary is not None:
+    print(json.dumps(summary, ensure_ascii=False))
+    raise SystemExit(0)
+
+matches = []
+for bundle_path in iter_bundle_paths():
+    try:
+        data = read_json(bundle_path)
+    except Exception:
+        continue
+    component = data.get("component") or {}
+    component_name = component.get("name") or data.get("name") or ""
+    relative_root = rel(bundle_path.parent)
+    bundle_json_rel = rel(bundle_path)
+    if query not in {component_name, relative_root, bundle_json_rel}:
+        continue
+    matches.append(collect_summary(bundle_path))
+
+if not matches:
+    print(
+        f"Could not resolve a component with self-test metadata from query: {query}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+if len(matches) > 1:
+    print(
+        f"Query is ambiguous for self-test discovery: {query}",
+        file=sys.stderr,
+    )
+    for item in matches:
+        print(
+            f"  - {item['component_name']} ({item['relative_root']})",
+            file=sys.stderr,
+        )
+    raise SystemExit(2)
+
+print(json.dumps(matches[0], ensure_ascii=False))
+PY
+}
+
+print_self_test_discovery_summary() {
+    local summary_json="${1:-}"
+    SELF_TEST_SUMMARY_JSON="$summary_json" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["SELF_TEST_SUMMARY_JSON"])
+
+if "components" in data:
+    components = data.get("components") or []
+    print(f"Discovered {len(components)} components with declared self-tests:")
+    for item in components:
+        print(
+            "  - "
+            f"{item.get('component_name')}  "
+            f"root={item.get('relative_root')}  "
+            f"declared={len(item.get('test_labels') or [])}  "
+            f"bundle_backed={len(item.get('aa_candidates') or [])}"
+        )
+    sys.exit(0)
+
+print(f"Component: {data.get('component_name')}")
+component_subsystem = str(data.get("component_subsystem") or "").strip()
+if component_subsystem:
+    print(f"Subsystem: {component_subsystem}")
+print(f"Root: {data.get('relative_root')}")
+print(f"bundle.json: {data.get('bundle_json_rel')}")
+print("")
+labels = data.get("test_labels") or []
+print(f"Declared self-test targets ({len(labels)}):")
+if labels:
+    for label in labels:
+        print(f"  - {label}")
+else:
+    print("  - none")
+
+framework_modules = data.get("framework_modules") or []
+print("")
+if framework_modules:
+    print(f"developer_test modules ({len(framework_modules)}):")
+    for item in framework_modules:
+        print(f"  - {item}")
+else:
+    print("developer_test modules: not derived from bundle.json labels")
+
+print("")
+candidates = data.get("aa_candidates") or []
+if candidates:
+    print(f"Bundle-backed aa test candidates ({len(candidates)}):")
+    for item in candidates:
+        print(
+            "  - "
+            f"{item.get('bundle_name')} / {item.get('module_name')}  "
+            f"({item.get('config_rel')})"
+        )
+else:
+    print("Bundle-backed aa test candidates: none found")
+    if labels:
+        print("  This component declares self-tests, but no bundle-backed config.json was found under its test tree.")
+        print("  Automatic `aa test` execution cannot be derived from bundle.json alone.")
+PY
+}
+
+resolve_self_test_bundle_candidate() {
+    local summary_json="${1:-}"
+    SELF_TEST_SUMMARY_JSON="$summary_json" python3 - <<'PY'
+import json
+import os
+import sys
+
+data = json.loads(os.environ["SELF_TEST_SUMMARY_JSON"])
+candidates = data.get("aa_candidates") or []
+
+if not candidates:
+    component_name = data.get("component_name") or "<unknown>"
+    print(
+        f"Component '{component_name}' does not expose bundle-backed self-test metadata for automatic `aa test`.",
+        file=sys.stderr,
+    )
+    print(
+        "Run `ohos test discover <component>` to inspect declared test targets, or pass explicit `--bundle` / `--module`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+if len(candidates) > 1:
+    component_name = data.get("component_name") or "<unknown>"
+    print(
+        f"Component '{component_name}' has multiple bundle-backed self-test candidates; choose one explicitly with `--bundle` / `--module`:",
+        file=sys.stderr,
+    )
+    for item in candidates:
+        print(
+            "  - "
+            f"{item.get('bundle_name')} / {item.get('module_name')}  "
+            f"({item.get('config_rel')})",
+            file=sys.stderr,
+        )
+    raise SystemExit(3)
+
+item = candidates[0]
+print(
+    "\t".join(
+        [
+            item.get("bundle_name") or "",
+            item.get("module_name") or "entry",
+            item.get("config_rel") or "",
+        ]
+    )
+)
+PY
+}
+
+resolve_self_test_framework_candidate() {
+    local summary_json="${1:-}"
+    SELF_TEST_SUMMARY_JSON="$summary_json" python3 - <<'PY'
+import json
+import os
+
+data = json.loads(os.environ["SELF_TEST_SUMMARY_JSON"])
+component_name = str(data.get("component_name") or "").strip()
+component_subsystem = str(data.get("component_subsystem") or "").strip()
+framework_modules = [str(item).strip() for item in data.get("framework_modules") or [] if str(item).strip()]
+default_module = framework_modules[0] if len(framework_modules) == 1 else ""
+print("\t".join([component_name, component_subsystem, default_module]))
+PY
+}
+
+cmd_test_discover() {
+    require_ohos_repo
+
+    local query="."
+    if [ $# -gt 0 ]; then
+        query="$1"
+        shift
+    fi
+    if [ $# -gt 0 ]; then
+        err "test discover: unexpected extra arguments: $*"
+        exit 1
+    fi
+
+    local summary_json=""
+    if [ "$query" = "--all" ]; then
+        summary_json="$(discover_self_test_component_json "__ALL__")" || exit $?
+    else
+        summary_json="$(discover_self_test_component_json "$query")" || exit $?
+    fi
+
+    print_self_test_discovery_summary "$summary_json"
+}
+
+cmd_test_self_test() {
+    require_ohos_repo
+
+    local query=""
+    local bundle_name=""
+    local module_name=""
+    local framework_mode="auto"
+    local part_name=""
+    local subsystem_name=""
+    local suite_name=""
+    local case_name=""
+    local productform="${OHOS_DEVELOPER_TEST_PRODUCTFORM:-phone}"
+    local coverage=false
+    local run_all=false
+    local repeat_count=0
+    local device=""
+    local hdc_endpoint="${XTS_HDC_ENDPOINT:-}"
+    local explicit_hdc_path=""
+    local dry_run=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bundle)
+                [ $# -ge 2 ] || { err "test self-test: --bundle requires a value"; exit 1; }
+                bundle_name="$2"
+                shift 2
+                ;;
+            --module)
+                [ $# -ge 2 ] || { err "test self-test: --module requires a value"; exit 1; }
+                module_name="$2"
+                shift 2
+                ;;
+            --framework)
+                [ $# -ge 2 ] || { err "test self-test: --framework requires a value"; exit 1; }
+                framework_mode="$2"
+                shift 2
+                ;;
+            --part)
+                [ $# -ge 2 ] || { err "test self-test: --part requires a value"; exit 1; }
+                part_name="$2"
+                shift 2
+                ;;
+            --subsystem)
+                [ $# -ge 2 ] || { err "test self-test: --subsystem requires a value"; exit 1; }
+                subsystem_name="$2"
+                shift 2
+                ;;
+            --suite)
+                [ $# -ge 2 ] || { err "test self-test: --suite requires a value"; exit 1; }
+                suite_name="$2"
+                shift 2
+                ;;
+            --case)
+                [ $# -ge 2 ] || { err "test self-test: --case requires a value"; exit 1; }
+                case_name="$2"
+                shift 2
+                ;;
+            --productform)
+                [ $# -ge 2 ] || { err "test self-test: --productform requires a value"; exit 1; }
+                productform="$2"
+                shift 2
+                ;;
+            --coverage)
+                coverage=true
+                shift
+                ;;
+            --repeat)
+                [ $# -ge 2 ] || { err "test self-test: --repeat requires a value"; exit 1; }
+                case "$2" in
+                    ''|*[!0-9]*)
+                        err "test self-test: --repeat expects a non-negative integer"
+                        exit 1
+                        ;;
+                esac
+                repeat_count="$2"
+                shift 2
+                ;;
+            --device|-d)
+                [ $# -ge 2 ] || { err "test self-test: --device requires a value"; exit 1; }
+                device="$2"
+                shift 2
+                ;;
+            --hdc-path)
+                [ $# -ge 2 ] || { err "test self-test: --hdc-path requires a value"; exit 1; }
+                explicit_hdc_path="$2"
+                shift 2
+                ;;
+            --hdc-endpoint)
+                [ $# -ge 2 ] || { err "test self-test: --hdc-endpoint requires a value"; exit 1; }
+                hdc_endpoint="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            help|--help|-h)
+                print_help_test
+                return 0
+                ;;
+            --all)
+                run_all=true
+                shift
+                ;;
+            auto|developer_test)
+                if [ -z "$query" ] && [ -z "$bundle_name" ] && [ "$framework_mode" = "auto" ]; then
+                    framework_mode="$1"
+                    shift
+                    continue
+                fi
+                if [ -n "$query" ]; then
+                    err "test self-test: unexpected extra positional argument: $1"
+                    exit 1
+                fi
+                query="$1"
+                shift
+                ;;
+            bundle)
+                if [ -z "$query" ] && [ -z "$bundle_name" ] && [ "$framework_mode" = "auto" ]; then
+                    framework_mode="bundle"
+                    shift
+                    continue
+                fi
+                if [ -n "$query" ]; then
+                    err "test self-test: unexpected extra positional argument: $1"
+                    exit 1
+                fi
+                query="$1"
+                shift
+                ;;
+            --*)
+                err "test self-test: unknown option: $1"
+                exit 1
+                ;;
+            *)
+                if [ -n "$query" ]; then
+                    err "test self-test: unexpected extra positional argument: $1"
+                    exit 1
+                fi
+                query="$1"
+                shift
+                ;;
+        esac
+    done
+
+    case "$framework_mode" in
+        auto|bundle|developer_test) ;;
+        *)
+            err "test self-test: unsupported --framework value: $framework_mode"
+            exit 1
+            ;;
+    esac
+
+    if [ "$run_all" = "true" ] && [ -n "$bundle_name" ]; then
+        err "test self-test: --all cannot be combined with --bundle"
+        exit 1
+    fi
+
+    local summary_json=""
+    if [ -n "$query" ]; then
+        summary_json="$(discover_self_test_component_json "$query")" || exit $?
+    fi
+
+    local prefers_framework=false
+    if [ "$run_all" = "true" ] || [ -n "$suite_name" ] || [ -n "$case_name" ] || [ "$coverage" = "true" ] || [ "$repeat_count" -gt 0 ] || [ -n "$part_name" ] || [ -n "$subsystem_name" ]; then
+        prefers_framework=true
+    fi
+
+    local bundle_candidate=""
+    if [ -z "$bundle_name" ] && [ -n "$summary_json" ]; then
+        bundle_candidate="$(resolve_self_test_bundle_candidate "$summary_json" 2>/dev/null || true)"
+    fi
+
+    if [ "$framework_mode" = "auto" ]; then
+        if [ "$run_all" = "true" ]; then
+            framework_mode="developer_test"
+        elif [ -n "$bundle_name" ]; then
+            framework_mode="bundle"
+        elif [ "$prefers_framework" = "true" ]; then
+            framework_mode="developer_test"
+        elif [ -n "$bundle_candidate" ]; then
+            framework_mode="bundle"
+        else
+            framework_mode="developer_test"
+        fi
+    fi
+
+    if [ "$framework_mode" = "bundle" ]; then
+        if [ "$run_all" = "true" ] || [ "$coverage" = "true" ] || [ "$repeat_count" -gt 0 ] || [ -n "$suite_name" ] || [ -n "$case_name" ] || [ -n "$part_name" ] || [ -n "$subsystem_name" ]; then
+            err "test self-test: --all/--coverage/--repeat/--suite/--case/--part/--subsystem are supported only with --framework developer_test"
+            exit 1
+        fi
+        local discovery_note=""
+        if [ -z "$bundle_name" ]; then
+            [ -n "$query" ] || {
+                err "test self-test: provide a component/path or explicit --bundle [--module]"
+                exit 1
+            }
+            if [ -z "$bundle_candidate" ]; then
+                resolve_self_test_bundle_candidate "$summary_json" >/dev/null
+                exit $?
+            fi
+            IFS=$'\t' read -r bundle_name module_name discovery_note <<<"$bundle_candidate"
+            info "Auto-discovered bundle-backed self-test metadata from ${discovery_note}"
+        fi
+
+        module_name="${module_name:-entry}"
+
+        local resolved_hdc_path=""
+        if [ -n "$explicit_hdc_path" ]; then
+            resolved_hdc_path="$explicit_hdc_path"
+        elif resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+            :
+        else
+            resolved_hdc_path="$(command -v hdc 2>/dev/null || true)"
+        fi
+
+        local hdc_cmd=()
+        if [ -n "$resolved_hdc_path" ]; then
+            hdc_cmd+=("$resolved_hdc_path")
+        else
+            hdc_cmd+=("hdc")
+        fi
+        if [ -n "$hdc_endpoint" ]; then
+            hdc_cmd+=("-s" "$hdc_endpoint")
+        fi
+        if [ -n "$device" ]; then
+            hdc_cmd+=("-t" "$device")
+        fi
+        hdc_cmd+=(shell aa test -b "$bundle_name" -m "$module_name" -s unittest OpenHarmonyTestRunner)
+
+        local env_cmd=()
+        env_cmd+=(env)
+        env_cmd+=("PATH=$(prepend_hdc_bin_dir_to_path "${resolved_hdc_path:-}")")
+        local hdc_lib_dir=""
+        if hdc_lib_dir="$(detect_hdc_library_path "${resolved_hdc_path:-}" 2>/dev/null)"; then
+            env_cmd+=("LD_LIBRARY_PATH=${hdc_lib_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}")
+        fi
+
+        if [ "$dry_run" = "true" ]; then
+            info "Self-test command:"
+            shell_join_command "${env_cmd[@]}" "${hdc_cmd[@]}"
+            return 0
+        fi
+
+        info "Running developer self-test bundle '${bundle_name}' module '${module_name}'"
+        ohos_run_foreground "${env_cmd[@]}" "${hdc_cmd[@]}"
+        return 0
+    fi
+
+    if [ -n "$bundle_name" ]; then
+        err "test self-test: --bundle is only valid with bundle mode"
+        exit 1
+    fi
+
+    local runner=""
+    if ! runner="$(resolve_developer_test_runner)"; then
+        if [ -n "$summary_json" ] && [ -z "$bundle_candidate" ]; then
+            err "Component '${part_name:-${query:-unknown}}' does not expose bundle-backed self-test metadata for automatic \`aa test\`."
+            err "Run \`ohos test discover <component>\` to inspect declared test targets or provide an explicit developer_test runner."
+        fi
+        err "Missing developer_test runner: ${OHOS_DEVELOPER_TEST_RUNNER:-${OHOS_DEVELOPER_TEST_DIR}/start.sh}"
+        exit 1
+    fi
+
+    if [ "$run_all" = "false" ] && [ -z "$part_name" ] && [ -z "$query" ]; then
+        err "test self-test: provide a component/path, --part, or --all for developer_test mode"
+        exit 1
+    fi
+
+    if [ -n "$summary_json" ]; then
+        local framework_candidate=""
+        framework_candidate="$(resolve_self_test_framework_candidate "$summary_json")"
+        local discovered_part=""
+        local discovered_subsystem=""
+        local discovered_module=""
+        IFS=$'\t' read -r discovered_part discovered_subsystem discovered_module <<<"$framework_candidate"
+        part_name="${part_name:-$discovered_part}"
+        subsystem_name="${subsystem_name:-$discovered_subsystem}"
+        module_name="${module_name:-$discovered_module}"
+    fi
+
+    local framework_cmd=()
+    framework_cmd+=("$runner" run -p "$productform" -t UT)
+    if [ -n "$subsystem_name" ]; then
+        framework_cmd+=(-ss "$subsystem_name")
+    fi
+    if [ "$run_all" != "true" ] && [ -n "$part_name" ]; then
+        framework_cmd+=(-tp "$part_name")
+    fi
+    if [ -n "$module_name" ]; then
+        framework_cmd+=(-tm "$module_name")
+    fi
+    if [ -n "$suite_name" ]; then
+        framework_cmd+=(-ts "$suite_name")
+    fi
+    if [ -n "$case_name" ]; then
+        framework_cmd+=(-tc "$case_name")
+    fi
+    if [ "$coverage" = "true" ]; then
+        framework_cmd+=(-cov)
+    fi
+    if [ "$repeat_count" -gt 0 ]; then
+        framework_cmd+=(--repeat "$repeat_count")
+    fi
+
+    local summary_xml=""
+    summary_xml="$(developer_test_latest_summary_xml "$runner" 2>/dev/null || true)"
+    if [ "$dry_run" = "true" ]; then
+        info "Self-test command:"
+        shell_join_command "${framework_cmd[@]}"
+        if [ -n "$summary_xml" ]; then
+            info "Expected summary XML: ${summary_xml}"
+        fi
+        return 0
+    fi
+
+    info "Running developer self-test via developer_test framework"
+    ohos_run_foreground "${framework_cmd[@]}"
+    if [ -n "$summary_xml" ] && [ -f "$summary_xml" ]; then
+        print_developer_test_summary "$summary_xml" || true
+    else
+        warn "developer_test finished, but no summary_report.xml was found at: ${summary_xml:-<unknown>}"
+    fi
+}
+
+cmd_test() {
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_test
+            ;;
+        discover)
+            cmd_test_discover "$@"
+            ;;
+        self-test)
+            cmd_test_self_test "$@"
+            ;;
+        *)
+            err "test: unknown subcommand: $subcmd"
+            print_help_test
             exit 1
             ;;
     esac
@@ -2000,6 +2790,7 @@ Tool commands:
   feedback                 Save project feedback / wishes next to this script
   pr [subcommand]          Wrapper around vendored gitee/gitcode PR helper
   run [subcommand]         Local run wrappers for host-side tests and post-build actions
+  test [subcommand]        Developer self-test discovery and bundle-backed device wrappers
   xts [subcommand]         Wrapper around vendored arkui-xts-selector flows
 
 Info commands:
@@ -2029,6 +2820,8 @@ Useful examples:
   ohos npmrc original
   ohos device help
   ohos run ut ace_engine_linux_unittest
+  ohos test discover ace_engine
+  ohos test self-test --bundle com.example.myapplication --module entry --dry-run
   ohos feedback
   ohos pr create-pr --repo openharmony/arkui_ace_engine --base master
   ohos xts sdk --sdk-build-tag 20260404_120537
@@ -2198,6 +2991,8 @@ Supported unit-test aliases:
 Notes:
   - These are local Linux-host gtest binaries under foundation/arkui/ace_engine/test/unittest.
   - They are not XTS/device tests.
+  - For device-side bundle-backed developer tests, use:
+      ohos test help
   - The wrapper expects the test binaries to be built already.
   - Extra runner flags are passed through to run.py, for example:
       -j/--process, -d/--debug, -o/--output
@@ -2207,6 +3002,58 @@ Examples:
   ohos run ut ace_engine_capi --debug
   ohos run ut ace_engine_linux_unittest
   ohos run ut ace_engine_linux_unittest -j 16 --output out/ace_linux_ut.json
+HELP
+}
+
+print_help_test() {
+    cat <<HELP
+test - developer self-test discovery and execution
+
+Usage:
+  ohos test discover <component|path>
+  ohos test discover --all
+  ohos test self-test <component|path> [--framework auto|bundle|developer_test] [--device SERIAL] [--hdc-path PATH] [--hdc-endpoint HOST:PORT] [--dry-run]
+  ohos test self-test --bundle <bundle> [--module <module>] [--framework bundle] [--device SERIAL] [--hdc-path PATH] [--hdc-endpoint HOST:PORT] [--dry-run]
+  ohos test self-test --framework developer_test --all [--productform phone] [--coverage] [--repeat N] [--dry-run]
+
+Subcommands:
+  discover
+      Inspect repo-side self-test metadata.
+      What it reads:
+        - <component>/bundle.json -> component.build.test
+        - <component>/test/**/config.json -> bundle-backed aa-test candidates
+      Notes:
+        - bundle.json is a valid discovery source for declared self-test targets
+        - derived output also shows developer_test module names when they can be inferred from declared labels
+        - use '--all' to list every component in the repo that declares self-tests
+
+  self-test
+      Run a developer self-test in one of two modes:
+        bundle mode:
+          hdc shell aa test -b <bundle> -m <module> -s unittest OpenHarmonyTestRunner
+        developer_test mode:
+          test/testfwk/developer_test/start.sh run -t UT ...
+      Resolution order in auto mode:
+        1. explicit --bundle forces bundle mode
+        2. framework-only options such as --all / --coverage / --suite / --case force developer_test mode
+        3. unique bundle metadata prefers bundle mode
+        4. otherwise the wrapper falls back to developer_test for GN/gtest-style self-tests
+      Notes:
+        - '--all' is supported only with '--framework developer_test'
+        - '--coverage' is supported only with '--framework developer_test'
+        - after a successful developer_test run, the wrapper prints a concise summary from reports/latest/summary_report.xml when present
+        - use '--dry-run' to print the exact command without executing it
+
+Examples:
+  ohos test discover ace_engine
+  ohos test discover ./foundation/arkui/ace_engine
+  ohos test discover --all
+  ohos test self-test ace_engine --dry-run
+  ohos test self-test gn_only --framework developer_test --dry-run
+  ohos test self-test --framework developer_test --all --dry-run
+  ohos test self-test ace_engine --framework developer_test --module unittest --suite SmokeSuite --dry-run
+  ohos test self-test --bundle com.example.myapplication --module entry --dry-run
+  ohos test self-test --bundle com.example.myapplication --module entry --device SER123456
 HELP
 }
 
@@ -2378,7 +3225,7 @@ What it runs:
   (cd "$ARKUI_XTS_SELECTOR_DIR" && PYTHONPATH=src python3 -m arkui_xts_selector ...)
 
 Supported subcommands:
-  select     Save a reusable selector report; accepts a raw MR URL as the first arg
+  select     Save a reusable selector report; accepts a raw PR/MR URL as the first arg
   run        Execute from a saved report (ohos xts run last) or raw selector args
   stage      Stage a compact ACTS testcase directory from a saved report
   compare    Compare two XTS runs by label or by result paths
@@ -2530,6 +3377,7 @@ cmd_help() {
         build) print_help_build ;;
         fr|fast-rebuild) print_help_fast_rebuild ;;
         run) print_help_run ;;
+        test) print_help_test ;;
         reset) print_help_reset ;;
         info) print_help_info ;;
         file) print_help_file ;;
@@ -2574,6 +3422,7 @@ dispatch_single_command() {
         manifest-save) cmd_manifest_save "$@" ;;
         pr) cmd_pr "$@" ;;
         run) cmd_run "$@" ;;
+        test) cmd_test "$@" ;;
         xts) cmd_xts "$@" ;;
         download) cmd_download "$@" ;;
         *)
@@ -2624,7 +3473,7 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
-    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|run|xts|download)
+    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|run|test|xts|download)
         cmd="$1"
         shift
         dispatch_single_command "$cmd" "$@"
