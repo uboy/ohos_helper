@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 
-OHOS_SH = Path("/data/shared/common/scripts/ohos.sh")
+SCRIPT_DIR = Path(__file__).resolve().parent
+OHOS_SH = SCRIPT_DIR / "ohos.sh"
 
 
 def run_cmd(cmd, cwd, env=None, check=True):

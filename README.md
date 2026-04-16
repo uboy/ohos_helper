@@ -37,6 +37,21 @@ git submodule update --init --recursive
 - `arkui-xts-selector/` - vendored selector tool
 - `gitee_util/` - vendored PR helper
 
+## Design Notes
+
+- [Project Relocation Design](docs/PROJECT_RELOCATION_SYMLINK_DESIGN.md) - move the whole workspace to a new canonical directory and preserve the old path as a symlink entry
+
+## Workspace Relocation
+
+You can validate and execute a full-root move using:
+
+```bash
+ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --dry-run
+ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --legacy-link /data/shared/common/scripts --yes
+```
+
+This moves the real project root and leaves the old path as a symlink.
+
 ## Local Configuration (Not In Git)
 
 Use a local config file outside the repository for machine-specific paths:

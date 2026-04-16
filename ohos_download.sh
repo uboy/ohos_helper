@@ -5,13 +5,48 @@ if [ -z "${BASH_VERSION:-}" ]; then
             exec bash "$0" "$@"
             ;;
     esac
-    printf '%s\n' "ohos_download.sh requires bash. Run it with: bash /data/shared/common/scripts/ohos_download.sh ..." >&2
+    printf '%s\n' "ohos_download.sh requires bash. Run it with: bash $0 ..." >&2
     return 1 2>/dev/null || exit 1
 fi
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+resolve_launch_script_path() {
+    local raw_path="$1"
+    local resolved="$raw_path"
+
+    if [[ "$resolved" != */* ]]; then
+        resolved="$(command -v "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+    fi
+    if [[ "$resolved" != /* ]]; then
+        resolved="$(pwd)/$resolved"
+    fi
+    printf '%s\n' "$resolved"
+}
+
+resolve_real_script_path() {
+    local source_path="$1"
+    local source_dir=""
+    local linked_target=""
+
+    while [ -L "$source_path" ]; do
+        source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+        linked_target="$(readlink "$source_path")"
+        if [[ "$linked_target" = /* ]]; then
+            source_path="$linked_target"
+        else
+            source_path="${source_dir}/${linked_target}"
+        fi
+    done
+    source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+    printf '%s\n' "${source_dir}/$(basename "$source_path")"
+}
+
+OHOS_LAUNCH_PATH="$(resolve_launch_script_path "$0")"
+OHOS_LAUNCH_DIR="$(cd -L "$(dirname "$OHOS_LAUNCH_PATH")" && pwd)"
+OHOS_REAL_PATH="$(resolve_real_script_path "$OHOS_LAUNCH_PATH")"
+OHOS_REAL_DIR="$(cd -P "$(dirname "$OHOS_REAL_PATH")" && pwd)"
+SCRIPT_DIR="$OHOS_REAL_DIR"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 OHOS_USER_CONF="${OHOS_USER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf}"
 OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"

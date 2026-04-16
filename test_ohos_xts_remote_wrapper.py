@@ -47,8 +47,9 @@ class OhosXtsRemoteWrapperTests(OhosXtsWrapperTests):
         capture = json.loads(self.ssh_capture_path.read_text(encoding="utf-8"))
         self.assertEqual(capture["argv"][0], "dmazur@buildmonster1")
         remote_command = capture["argv"][1]
+        expected_wrapper = f"bash\\ {OHOS_SH}\\ xts\\ run"
         self.assertIn("OHOS_XTS_REMOTE_EXEC=1", remote_command)
-        self.assertIn("bash\\ /data/shared/common/scripts/ohos.sh\\ xts\\ run", remote_command)
+        self.assertIn(expected_wrapper, remote_command)
         self.assertIn("--from-report\\ /tmp/selector_report.json", remote_command)
         self.assertIn("--server-host\\ buildmonster1", remote_command)
         self.assertIn("--server-user\\ dmazur", remote_command)

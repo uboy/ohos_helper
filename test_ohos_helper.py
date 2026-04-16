@@ -8,7 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
-HELPER_PATH = Path("/data/shared/common/scripts/ohos-helper.py")
+SCRIPT_DIR = Path(__file__).resolve().parent
+HELPER_PATH = SCRIPT_DIR / "ohos-helper.py"
 SPEC = importlib.util.spec_from_file_location("ohos_helper", HELPER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 ohos_helper = importlib.util.module_from_spec(SPEC)

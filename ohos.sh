@@ -7,7 +7,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
             exec bash "$0" "$@"
             ;;
     esac
-    printf '%s\n' "ohos.sh requires bash. Run it with: bash /data/shared/common/scripts/ohos.sh ..." >&2
+    printf '%s\n' "ohos.sh requires bash. Run it with: bash $0 ..." >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -16,7 +16,56 @@ fi
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+resolve_launch_script_path() {
+    local raw_path="$1"
+    local resolved="$raw_path"
+
+    if [[ "$resolved" != */* ]]; then
+        resolved="$(command -v "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+    fi
+    if [[ "$resolved" != /* ]]; then
+        resolved="$(pwd)/$resolved"
+    fi
+    printf '%s\n' "$resolved"
+}
+
+resolve_real_script_path() {
+    local source_path="$1"
+    local source_dir=""
+    local linked_target=""
+
+    while [ -L "$source_path" ]; do
+        source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+        linked_target="$(readlink "$source_path")"
+        if [[ "$linked_target" = /* ]]; then
+            source_path="$linked_target"
+        else
+            source_path="${source_dir}/${linked_target}"
+        fi
+    done
+    source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+    printf '%s\n' "${source_dir}/$(basename "$source_path")"
+}
+
+resolve_absolute_path() {
+    local input_path="$1"
+    python3 - "$input_path" <<'PY'
+import sys
+from pathlib import Path
+
+value = Path(sys.argv[1]).expanduser()
+if value.is_absolute():
+    print(str(value))
+else:
+    print(str((Path.cwd() / value).resolve(strict=False)))
+PY
+}
+
+OHOS_LAUNCH_PATH="$(resolve_launch_script_path "$0")"
+OHOS_LAUNCH_DIR="$(cd -L "$(dirname "$OHOS_LAUNCH_PATH")" && pwd)"
+OHOS_REAL_PATH="$(resolve_real_script_path "$OHOS_LAUNCH_PATH")"
+OHOS_REAL_DIR="$(cd -P "$(dirname "$OHOS_REAL_PATH")" && pwd)"
+SCRIPT_DIR="$OHOS_REAL_DIR"
 OHOS_HELPER="${OHOS_HELPER:-${SCRIPT_DIR}/ohos-helper.py}"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
 OHOS_USER_CONF="${OHOS_USER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf}"
@@ -2938,7 +2987,7 @@ run_xts_remote_command() {
 
     local remote_payload=""
     local remote_command=""
-    remote_payload="$(shell_join_command env OHOS_XTS_REMOTE_EXEC=1 bash "${SCRIPT_DIR}/ohos.sh" xts "$subcmd" "$@")"
+    remote_payload="$(shell_join_command env OHOS_XTS_REMOTE_EXEC=1 bash "${OHOS_LAUNCH_DIR}/ohos.sh" xts "$subcmd" "$@")"
     remote_command="$(shell_join_command bash -lc "$remote_payload")"
 
     info "Delegating 'ohos xts ${subcmd}' to remote execution host: ${target}"
@@ -2947,6 +2996,164 @@ run_xts_remote_command() {
 
 cmd_download() {
     run_download_tool "$@"
+}
+
+cmd_admin_relocate() {
+    local target_root=""
+    local legacy_link="$OHOS_LAUNCH_DIR"
+    local dry_run=false
+    local assume_yes=false
+    local current_real_root="$OHOS_REAL_DIR"
+    local current_launch_root="$OHOS_LAUNCH_DIR"
+    local target_root_abs=""
+    local legacy_link_abs=""
+    local target_parent=""
+    local legacy_parent=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --target-root)
+                [ $# -ge 2 ] || { err "admin relocate: missing value for $1"; exit 1; }
+                target_root="$2"
+                shift 2
+                ;;
+            --target-root=*)
+                target_root="${1#--target-root=}"
+                shift
+                ;;
+            --legacy-link)
+                [ $# -ge 2 ] || { err "admin relocate: missing value for $1"; exit 1; }
+                legacy_link="$2"
+                shift 2
+                ;;
+            --legacy-link=*)
+                legacy_link="${1#--legacy-link=}"
+                shift
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            --yes)
+                assume_yes=true
+                shift
+                ;;
+            --help|-h)
+                print_help_admin
+                return 0
+                ;;
+            *)
+                err "admin relocate: unknown option $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -z "$target_root" ]; then
+        err "admin relocate: --target-root is required"
+        err "Example: ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --dry-run"
+        exit 1
+    fi
+
+    target_root_abs="$(resolve_absolute_path "$target_root")"
+    legacy_link_abs="$(resolve_absolute_path "$legacy_link")"
+
+    if [ "$target_root_abs" = "$current_real_root" ]; then
+        err "admin relocate: target root is already current real root: $target_root_abs"
+        exit 1
+    fi
+    if [[ "$target_root_abs" == "$current_real_root/"* ]]; then
+        err "admin relocate: target root cannot be inside current real root"
+        err "current_real_root=$current_real_root"
+        err "target_root=$target_root_abs"
+        exit 1
+    fi
+
+    target_parent="$(dirname "$target_root_abs")"
+    legacy_parent="$(dirname "$legacy_link_abs")"
+
+    if [ -e "$target_root_abs" ] || [ -L "$target_root_abs" ]; then
+        err "admin relocate: target root already exists: $target_root_abs"
+        exit 1
+    fi
+    if [ -e "$legacy_link_abs" ] || [ -L "$legacy_link_abs" ]; then
+        if [ "$legacy_link_abs" != "$current_launch_root" ] && [ "$legacy_link_abs" != "$current_real_root" ]; then
+            if [ -L "$legacy_link_abs" ]; then
+                warn "admin relocate: legacy link path is an existing symlink and will be replaced: $legacy_link_abs"
+            else
+                err "admin relocate: legacy link path exists and is not the current project root: $legacy_link_abs"
+                exit 1
+            fi
+        fi
+    fi
+
+    info "Relocation plan"
+    echo "  current launch root : $current_launch_root"
+    echo "  current real root   : $current_real_root"
+    echo "  target real root    : $target_root_abs"
+    echo "  legacy link path    : $legacy_link_abs"
+    echo "  move command        : mv '$current_real_root' '$target_root_abs'"
+    echo "  link command        : ln -s '$target_root_abs' '$legacy_link_abs'"
+
+    if [ "$dry_run" = "true" ]; then
+        info "Dry-run completed. No filesystem changes were made."
+        return 0
+    fi
+
+    if [ "$assume_yes" != "true" ]; then
+        if ! confirm_default_no "Proceed with relocation now? [y/N] "; then
+            info "Aborted."
+            return 0
+        fi
+    fi
+
+    mkdir -p "$target_parent"
+    if [ "$legacy_parent" != "$target_parent" ]; then
+        mkdir -p "$legacy_parent"
+    fi
+
+    info "Moving project root: $current_real_root -> $target_root_abs"
+    mv "$current_real_root" "$target_root_abs"
+
+    if [ -L "$legacy_link_abs" ]; then
+        rm -f "$legacy_link_abs"
+    elif [ -e "$legacy_link_abs" ]; then
+        err "Failed to create legacy symlink: path already exists after move: $legacy_link_abs"
+        err "Rolling back: moving project back to $current_real_root"
+        mv "$target_root_abs" "$current_real_root" || true
+        exit 1
+    fi
+
+    if ! ln -s "$target_root_abs" "$legacy_link_abs"; then
+        err "Failed to create legacy symlink: $legacy_link_abs -> $target_root_abs"
+        err "Rolling back: moving project back to $current_real_root"
+        mv "$target_root_abs" "$current_real_root" || true
+        exit 1
+    fi
+
+    info "Relocation completed."
+    info "Legacy path now points to: $legacy_link_abs -> $target_root_abs"
+}
+
+cmd_admin() {
+    local subcmd="${1:-help}"
+    if [ $# -gt 0 ]; then
+        shift
+    fi
+
+    case "$subcmd" in
+        help|--help|-h|"")
+            print_help_admin
+            ;;
+        relocate)
+            cmd_admin_relocate "$@"
+            ;;
+        *)
+            err "admin: unknown subcommand: $subcmd"
+            print_help_admin
+            exit 1
+            ;;
+    esac
 }
 
 cmd_xts() {
@@ -3119,6 +3326,7 @@ Chainable commands:
   fr [target] [args]       Quick rebuild with ./build.sh --fast-rebuild
 
 Tool commands:
+  admin [subcommand]       Workspace admin helpers (for example project relocation)
   download [subcommand]    Download daily SDK / firmware / XTS test packages
   device [subcommand]      Device-oriented helpers: remote HDC access and bridge packaging
   feedback                 Save project feedback / wishes next to this script
@@ -3151,6 +3359,7 @@ Useful examples:
   ohos download sdk
   ohos download sdk 20260404_120537
   ohos download firmware 20260404_120244
+  ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --dry-run
   ohos npmrc original
   ohos device help
   ohos run ut ace_engine_linux_unittest
@@ -3708,6 +3917,35 @@ print_help_download() {
     err "Missing download tool: $OHOS_DOWNLOAD_TOOL"
 }
 
+print_help_admin() {
+    cat <<HELP
+admin - workspace maintenance helpers
+
+Usage:
+  ohos admin help
+  ohos admin relocate --target-root <path> [--legacy-link <path>] [--dry-run] [--yes]
+
+Subcommands:
+  relocate
+      Move the current project root to a new canonical location and create
+      a legacy symlink path.
+
+      Path model:
+        - current real root: resolved script directory (follows symlinks)
+        - legacy link path: launch directory path by default
+
+      Safety:
+        - target root must not exist
+        - target root must not be inside current real root
+        - dry-run prints the plan without changing filesystem state
+        - real move asks confirmation unless --yes is passed
+
+Examples:
+  ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --dry-run
+  ohos admin relocate --target-root /data/shared/common/projects/ohos-helper --legacy-link /data/shared/common/scripts --yes
+HELP
+}
+
 cmd_help() {
     local topic="${1:-}"
     case "$topic" in
@@ -3726,6 +3964,7 @@ cmd_help() {
         pr) print_help_pr ;;
         xts) print_help_xts ;;
         download) print_help_download ;;
+        admin) print_help_admin ;;
         npmrc) print_help_npmrc ;;
         gc|products|parts|params|config|manifest-save)
             print_help_overview
@@ -3755,6 +3994,7 @@ dispatch_single_command() {
         info) cmd_info "$@" ;;
         file) cmd_file "$@" ;;
         device) cmd_device "$@" ;;
+        admin) cmd_admin "$@" ;;
         feedback) cmd_feedback "$@" ;;
         params) cmd_params "$@" ;;
         npmrc) cmd_npmrc "$@" ;;
@@ -3821,7 +4061,7 @@ if [ $# -eq 0 ]; then
 fi
 
 case "$1" in
-    help|--help|-h|products|parts|info|file|device|feedback|params|npmrc|config|manifest-save|pr|run|test|xts|download)
+    help|--help|-h|products|parts|info|file|device|admin|feedback|params|npmrc|config|manifest-save|pr|run|test|xts|download)
         cmd="$1"
         shift
         dispatch_single_command "$cmd" "$@"

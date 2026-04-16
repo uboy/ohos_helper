@@ -6,7 +6,8 @@ import zipfile
 from pathlib import Path
 
 
-BRIDGE_TOOL = Path("/data/shared/common/scripts/ohos_xts_bridge.py")
+SCRIPT_DIR = Path(__file__).resolve().parent
+BRIDGE_TOOL = SCRIPT_DIR / "ohos_xts_bridge.py"
 
 
 def run_cmd(cmd, cwd, check=True):
