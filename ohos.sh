@@ -196,6 +196,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SYNC_FORCE_ENABLED=false
+SYNC_RAW_OUTPUT=false
 LAST_STEP_LOG=""
 OHOS_ACTIVE_CHILD_PID=""
 OHOS_ACTIVE_CHILD_PGID=""
@@ -831,6 +832,18 @@ run_logged_command() {
     return "$rc"
 }
 
+run_logged_command_via_pty() {
+    local log_path="$1"
+    local rc
+    shift
+    local rendered=""
+
+    rendered="$(shell_join_command "$@")"
+    script -qefc "$rendered" /dev/null 2>&1 | tee "$log_path"
+    rc=${PIPESTATUS[0]}
+    return "$rc"
+}
+
 format_duration_compact() {
     local total="${1:-0}"
     if [ "$total" -lt 0 ]; then
@@ -958,8 +971,24 @@ run_logged_command_with_progress() {
     fi
     start_ts="$(date +%s)"
 
-    "$@" >"$log_path" 2>&1 &
-    pid=$!
+    if [ "${SYNC_RAW_OUTPUT:-false}" = "true" ]; then
+        if has_command script; then
+            run_logged_command_via_pty "$log_path" "$@"
+        else
+            run_logged_command "$log_path" "$@"
+        fi
+        return $?
+    fi
+
+    if has_command script; then
+        local rendered=""
+        rendered="$(shell_join_command "$@")"
+        script -qefc "$rendered" /dev/null >"$log_path" 2>&1 &
+        pid=$!
+    else
+        "$@" >"$log_path" 2>&1 &
+        pid=$!
+    fi
 
     while kill -0 "$pid" 2>/dev/null; do
         case "$progress_kind" in
@@ -1363,10 +1392,12 @@ cmd_sync() {
     local run_prebuilts=true
 
     SYNC_FORCE_ENABLED=false
+    SYNC_RAW_OUTPUT=false
 
     while [ $# -gt 0 ]; do
         case "$1" in
             -f|--force) SYNC_FORCE_ENABLED=true ;;
+            --raw-output) SYNC_RAW_OUTPUT=true ;;
             --skip-lfs) run_lfs=false ;;
             --skip-prebuilts) run_prebuilts=false ;;
             --repo-only)
@@ -3445,6 +3476,8 @@ Options:
   -f, --force
       Back up a conflicting sibling prebuilts path automatically and, if repo checkout fails,
       discard local tracked/untracked changes in the failing repos before retrying.
+  --raw-output
+      Disable the compact progress bar and print the underlying command output directly.
   --skip-lfs
   --skip-prebuilts
   --repo-only
@@ -3452,6 +3485,7 @@ Options:
 Examples:
   ohos sync
   ohos sync -f
+  ohos sync --raw-output
   ohos sync build
   ohos sync --repo-only
 HELP
@@ -4125,7 +4159,7 @@ while [ $# -gt 0 ]; do
             sync_args=()
             while [ $# -gt 0 ] && ! is_chainable_command "$1"; do
                 case "$1" in
-                    -f|--force|--skip-lfs|--skip-prebuilts|--repo-only)
+                    -f|--force|--raw-output|--skip-lfs|--skip-prebuilts|--repo-only)
                         sync_args+=("$1")
                         shift
                         ;;

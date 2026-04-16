@@ -77,6 +77,29 @@ class OhosSyncTests(unittest.TestCase):
     def write_fake_repo(self, script_body: str) -> None:
         write_executable(self.bin_dir / "repo", script_body)
 
+    def write_fake_script_wrapper(self) -> None:
+        write_executable(
+            self.bin_dir / "script",
+            """#!/bin/bash
+set -euo pipefail
+cmd=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -qefc)
+      shift
+      cmd="${1:-}"
+      shift || true
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+[ -n "$cmd" ] || exit 2
+FAKE_TTY=1 bash -lc "$cmd"
+""",
+        )
+
     def init_git_repo(self, repo_path: Path) -> None:
         repo_path.mkdir(parents=True)
         run_cmd(["git", "init"], cwd=repo_path)
@@ -259,6 +282,76 @@ esac
         self.assertEqual(result.returncode, 0, output)
         self.assertRegex(normalized, re.compile(r"repo sync: .*\(503/503\)"))
         self.assertRegex(normalized, re.compile(r"git lfs: .*\(503/503\)"))
+
+    def test_sync_progress_uses_script_pty_when_repo_is_silent_without_tty(self):
+        self.write_fake_script_wrapper()
+        self.write_fake_repo(
+            """#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    for i in $(seq 1 503); do
+      echo "proj_$i"
+    done
+    ;;
+  sync)
+    if [ "${FAKE_TTY:-0}" = "1" ]; then
+      cat <<'EOF'
+Fetching projects:   6% (34/503)
+Fetching projects: 100% (503/503), done.
+EOF
+    else
+      sleep 2
+    fi
+    ;;
+  forall)
+    if [ "${FAKE_TTY:-0}" = "1" ]; then
+      for i in $(seq 1 503); do
+        echo "project path/proj_$i"
+      done
+    fi
+    ;;
+  *)
+    echo "unexpected repo subcommand: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+"""
+        )
+
+        result = self.run_sync("--skip-prebuilts")
+        output = self.combined_output(result).replace("\r", "\n")
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertRegex(output, re.compile(r"repo sync: .*\(503/503\)"))
+        self.assertRegex(output, re.compile(r"git lfs: .*\(503/503\)"))
+
+    def test_sync_raw_output_disables_progress_bar_and_streams_command_output(self):
+        self.write_fake_script_wrapper()
+        self.write_fake_repo(
+            """#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  sync)
+    cat <<'EOF'
+Fetching projects:   6% (34/503)
+Fetching projects: 100% (503/503), done.
+EOF
+    ;;
+  *)
+    echo "unexpected repo subcommand: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+"""
+        )
+
+        result = self.run_sync("--repo-only", "--raw-output")
+        output = self.combined_output(result)
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("Fetching projects: 100% (503/503), done.", output)
+        self.assertNotIn("repo sync: [", output)
 
 
 if __name__ == "__main__":

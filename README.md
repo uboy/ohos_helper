@@ -136,3 +136,4 @@ Behavior details:
 - console shows a single updating progress line with elapsed time and ETA
 - on stage failure, the script prints a highlighted error and the tail of the stage log
 - full stage logs are still written under `.runtime/sync-logs/`
+- use `ohos sync --raw-output` when you want the underlying `repo` / `git lfs` output directly instead of the compact progress renderer
