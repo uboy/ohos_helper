@@ -13,11 +13,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
+OHOS_USER_CONF="${OHOS_USER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf}"
 OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
 OHOS_XTS_ARTIFACTS_TOOL="${OHOS_XTS_ARTIFACTS_TOOL:-${SCRIPT_DIR}/ohos_xts_artifacts.py}"
 ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR:-${SCRIPT_DIR}/arkui-xts-selector}"
-SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
-FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
 OHOS_DOWNLOAD_ACTIVE_CHILD_PID=""
 OHOS_DOWNLOAD_SIGNAL_MESSAGE_EMITTED=0
 
@@ -25,14 +24,46 @@ if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_CONF"
 fi
+if [ -f "$OHOS_USER_CONF" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_USER_CONF"
+fi
+
+if [ -z "${OHOS_SHARED_DOWNLOAD_ROOT:-}" ]; then
+    if [ -d "/data/shared/common" ]; then
+        OHOS_SHARED_DOWNLOAD_ROOT="/data/shared/common"
+    elif [ -d "/data/shared" ]; then
+        OHOS_SHARED_DOWNLOAD_ROOT="/data/shared/ohos-downloads/${USER:-$(id -un 2>/dev/null || echo user)}"
+    else
+        OHOS_SHARED_DOWNLOAD_ROOT="$HOME/.cache/ohos-downloads"
+    fi
+fi
+if [ -z "${XTS_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        XTS_DOWNLOAD_ROOT="/data/shared/common/xts_tests"
+    else
+        XTS_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/tests"
+    fi
+fi
+if [ -z "${SDK_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        SDK_DOWNLOAD_ROOT="/data/shared/common/sdk"
+    else
+        SDK_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/sdk"
+    fi
+fi
+if [ -z "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        FIRMWARE_DOWNLOAD_ROOT="/data/shared/common/firmwares"
+    else
+        FIRMWARE_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/firmware"
+    fi
+fi
 
 if [ -f "$OHOS_XTS_RUNTIME_LIB" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_XTS_RUNTIME_LIB"
 fi
-
-SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
-FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -131,6 +162,9 @@ run_xts_artifacts_tool() {
     fi
     if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
         extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
+    fi
+    if [ -n "${XTS_DOWNLOAD_ROOT:-}" ]; then
+        extra_args+=(--daily-cache-root "$XTS_DOWNLOAD_ROOT")
     fi
 
     download_run_foreground env \
@@ -335,10 +369,11 @@ Subcommands:
   list-tags [tests|sdk|firmware]
                  List the most recent available build tags (default: tests)
 
-Download roots (configured in ${OHOS_CONF}):
+Download roots (configured in ${OHOS_CONF} and ${OHOS_USER_CONF}):
+  Shared   → $OHOS_SHARED_DOWNLOAD_ROOT
   SDK      → $SDK_DOWNLOAD_ROOT
   Firmware → $FIRMWARE_DOWNLOAD_ROOT
-  XTS      → /tmp/arkui_xts_selector_daily_cache  (override with --daily-cache-root)
+  XTS      → $XTS_DOWNLOAD_ROOT
 
 Behavior:
   - In an interactive terminal, plain 'ohos download' opens an arrow-key menu for tests / sdk / firmware.
@@ -348,6 +383,7 @@ Behavior:
   - A plain positional tag is accepted, e.g. 'ohos download firmware 20260404_120244'.
   - Interrupted downloads are resumed automatically (HTTP Range).
   - Archive filenames include the build tag for easy identification.
+  - If a cached archive or extracted package is already present, the tool prints that it was found and skips re-downloading.
   - Already-downloaded archives are not re-fetched unless the .part file exists.
   - Set OHOS_DOWNLOAD_MENU_FORCE=1 to force the menu in tests or other non-TTY environments.
 

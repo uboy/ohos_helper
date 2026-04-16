@@ -100,6 +100,7 @@ class OhosXtsWrapperTests(unittest.TestCase):
         self.prebuilts_capture_path = self.root / "prebuilts_capture.json"
         self.build_capture_path = self.root / "build_capture.json"
         self.unit_run_capture_path = self.root / "unit_run_capture.json"
+        self.tdd_capture_path = self.root / "tdd_capture.json"
         (package_dir / "__main__.py").write_text(
             (
                 "import json\n"
@@ -205,6 +206,10 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "  'env': {\n"
                 "    'ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH': os.environ.get('ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH', ''),\n"
                 "    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),\n"
+                "    'OHOS_SHARED_DOWNLOAD_ROOT': os.environ.get('OHOS_SHARED_DOWNLOAD_ROOT', ''),\n"
+                "    'XTS_DOWNLOAD_ROOT': os.environ.get('XTS_DOWNLOAD_ROOT', ''),\n"
+                "    'SDK_DOWNLOAD_ROOT': os.environ.get('SDK_DOWNLOAD_ROOT', ''),\n"
+                "    'FIRMWARE_DOWNLOAD_ROOT': os.environ.get('FIRMWARE_DOWNLOAD_ROOT', ''),\n"
                 "  },\n"
                 "}, indent=2), encoding='utf-8')\n"
             ),
@@ -219,6 +224,19 @@ class OhosXtsWrapperTests(unittest.TestCase):
                 "import sys\n"
                 "from pathlib import Path\n"
                 "capture_path = Path(os.environ['TEST_UNIT_RUN_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_tdd_runner = self.root / "ohos_tdd_runner.py"
+        write_executable(
+            self.fake_tdd_runner,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_TDD_CAPTURE'])\n"
                 "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
             ),
         )
@@ -303,6 +321,12 @@ exit 127
         write_executable(self.working_flash_root / "flash.py", "#!/usr/bin/env python3\n")
         (self.working_flash_root / "bin").mkdir(parents=True, exist_ok=True)
         write_executable(self.working_flash_root / "bin" / f"flash.{os.uname().machine}", "#!/bin/bash\nexit 0\n")
+        self.developer_test_dir = self.repo_root / "test" / "testfwk" / "developer_test"
+        self.developer_test_dir.mkdir(parents=True, exist_ok=True)
+        write_executable(
+            self.developer_test_dir / "start.sh",
+            "#!/bin/bash\nexit 0\n",
+        )
 
         self.env = os.environ.copy()
         self.env["PATH"] = f"{self.fake_bin_dir}:{self.hdc_lib_dir}:{self.env['PATH']}"
@@ -327,6 +351,8 @@ exit 127
         self.env["SHARED_PREBUILTS_DIR"] = str(self.shared_prebuilts_dir)
         self.env["OHOS_ACE_UNITTEST_RUNNER"] = str(self.fake_ace_unittest_runner)
         self.env["TEST_UNIT_RUN_CAPTURE"] = str(self.unit_run_capture_path)
+        self.env["OHOS_TDD_RUNNER_TOOL"] = str(self.fake_tdd_runner)
+        self.env["TEST_TDD_CAPTURE"] = str(self.tdd_capture_path)
         self.env["USER"] = "deviceuser"
 
     def run_and_signal(self, cmd, env, sig):
@@ -944,6 +970,84 @@ exit 127
         self.assertIn("--sdk-build-tag", argv)
         self.assertEqual(argv[argv.index("--sdk-build-tag") + 1], "20260409_120125")
 
+    def test_download_tests_uses_shared_common_roots_by_default(self):
+        env = self.env.copy()
+        env.pop("OHOS_SHARED_DOWNLOAD_ROOT", None)
+        env.pop("XTS_DOWNLOAD_ROOT", None)
+        env.pop("SDK_DOWNLOAD_ROOT", None)
+        env.pop("FIRMWARE_DOWNLOAD_ROOT", None)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+                "tests",
+                "--daily-build-tag",
+                "20260410_120510",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--daily-cache-root", argv)
+        self.assertEqual(argv[argv.index("--daily-cache-root") + 1], "/data/shared/common/xts_tests")
+        self.assertIn("--sdk-cache-root", argv)
+        self.assertEqual(argv[argv.index("--sdk-cache-root") + 1], "/data/shared/common/sdk")
+        self.assertIn("--firmware-cache-root", argv)
+        self.assertEqual(argv[argv.index("--firmware-cache-root") + 1], "/data/shared/common/firmwares")
+
+    def test_download_roots_follow_user_local_conf_overrides(self):
+        local_conf = self.root / ".config" / "ohos" / "local.conf"
+        local_conf.parent.mkdir(parents=True, exist_ok=True)
+        local_conf.write_text(
+            "\n".join(
+                [
+                    'OHOS_SHARED_DOWNLOAD_ROOT="/tmp/shared-root-unused"',
+                    f'XTS_DOWNLOAD_ROOT="{self.root / "custom-xts"}"',
+                    f'SDK_DOWNLOAD_ROOT="{self.root / "custom-sdk"}"',
+                    f'FIRMWARE_DOWNLOAD_ROOT="{self.root / "custom-firmware"}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        env = self.env.copy()
+        env["OHOS_USER_CONF"] = str(local_conf)
+        env.pop("OHOS_SHARED_DOWNLOAD_ROOT", None)
+        env.pop("XTS_DOWNLOAD_ROOT", None)
+        env.pop("SDK_DOWNLOAD_ROOT", None)
+        env.pop("FIRMWARE_DOWNLOAD_ROOT", None)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+                "firmware",
+                "--firmware-build-tag",
+                "20260410_120244",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--daily-cache-root", argv)
+        self.assertEqual(argv[argv.index("--daily-cache-root") + 1], str(self.root / "custom-xts"))
+        self.assertIn("--sdk-cache-root", argv)
+        self.assertEqual(argv[argv.index("--sdk-cache-root") + 1], str(self.root / "custom-sdk"))
+        self.assertIn("--firmware-cache-root", argv)
+        self.assertEqual(argv[argv.index("--firmware-cache-root") + 1], str(self.root / "custom-firmware"))
+
     def test_help_download_uses_extracted_tool(self):
         result = run_cmd(
             [
@@ -960,6 +1064,64 @@ exit 127
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("download - download daily prebuilt SDK, firmware or XTS test packages", result.stdout)
         self.assertIn("ohos download tests 20260404_120510", result.stdout)
+        self.assertIn("XTS      →", result.stdout)
+        self.assertIn("/xts_tests", result.stdout)
+
+    def test_help_xts_recommends_device_flash_command(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "xts",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos device flash --firmware-build-tag", result.stdout)
+        self.assertNotIn("ohos xts flash --firmware-build-tag", result.stdout)
+
+    def test_self_test_developer_framework_uses_tdd_runner_for_remote_device(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "test",
+                "self-test",
+                "--framework",
+                "developer_test",
+                "--all",
+                "--hdc-endpoint",
+                "127.0.0.1:28710",
+                "--device",
+                "SER123456",
+                "--dry-run",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.tdd_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--repo-root", argv)
+        self.assertEqual(argv[argv.index("--repo-root") + 1], str(self.repo_root))
+        self.assertIn("--runner-path", argv)
+        self.assertEqual(argv[argv.index("--runner-path") + 1], str(self.developer_test_dir / "start.sh"))
+        self.assertIn("--hdc-endpoint", argv)
+        self.assertEqual(argv[argv.index("--hdc-endpoint") + 1], "127.0.0.1:28710")
+        self.assertIn("--device", argv)
+        self.assertEqual(argv[argv.index("--device") + 1], "SER123456")
+        self.assertIn("--framework-args", argv)
+        self.assertIn("-p", argv)
+        self.assertIn("phone", argv)
+        self.assertIn("-t", argv)
+        self.assertIn("UT", argv)
+        self.assertIn("--dry-run", argv)
 
     def test_download_menu_escape_cancels_cleanly(self):
         env = self.env.copy()

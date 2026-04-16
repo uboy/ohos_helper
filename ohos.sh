@@ -19,6 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OHOS_HELPER="${OHOS_HELPER:-${SCRIPT_DIR}/ohos-helper.py}"
 OHOS_CONF="${OHOS_CONF:-${SCRIPT_DIR}/ohos.conf}"
+OHOS_USER_CONF="${OHOS_USER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf}"
 OHOS_XTS_RUNTIME_LIB="${OHOS_XTS_RUNTIME_LIB:-${SCRIPT_DIR}/ohos_xts_runtime.sh}"
 CURL_WRAPPER="${SCRIPT_DIR}/ohos-curl-fallback"
 GITEE_UTIL_RUNNER="${GITEE_UTIL_RUNNER:-${SCRIPT_DIR}/gitee-util-runner.py}"
@@ -31,12 +32,17 @@ OHOS_ACE_UNITTEST_RUNNER="${OHOS_ACE_UNITTEST_RUNNER:-foundation/arkui/ace_engin
 OHOS_DEVELOPER_TEST_DIR="${OHOS_DEVELOPER_TEST_DIR:-test/testfwk/developer_test}"
 OHOS_DEVELOPER_TEST_RUNNER="${OHOS_DEVELOPER_TEST_RUNNER:-}"
 OHOS_DEVELOPER_TEST_PRODUCTFORM="${OHOS_DEVELOPER_TEST_PRODUCTFORM:-phone}"
+OHOS_TDD_RUNNER_TOOL="${OHOS_TDD_RUNNER_TOOL:-${SCRIPT_DIR}/ohos_tdd_runner.py}"
 OHOS_PR_COMMENTS_VIEWER="${OHOS_PR_COMMENTS_VIEWER:-${SCRIPT_DIR}/ohos_pr_comments_view.py}"
 OHOS_FEEDBACK_DIR="${OHOS_FEEDBACK_DIR:-${SCRIPT_DIR}/feedback}"
 
 if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_CONF"
+fi
+if [ -f "$OHOS_USER_CONF" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_USER_CONF"
 fi
 
 if [ -f "$OHOS_XTS_RUNTIME_LIB" ]; then
@@ -93,12 +99,45 @@ NVM_INSTALL_URL="${NVM_INSTALL_URL:-https://raw.githubusercontent.com/nvm-sh/nvm
 SHARED_PREBUILTS_DIR="${SHARED_PREBUILTS_DIR:-/data/shared/openharmony_prebuilts}"
 PREBUILTS_SYMLINK_NAME="${PREBUILTS_SYMLINK_NAME:-openharmony_prebuilts}"
 
-SDK_DOWNLOAD_ROOT="${SDK_DOWNLOAD_ROOT:-$HOME/ohos-sdk}"
-FIRMWARE_DOWNLOAD_ROOT="${FIRMWARE_DOWNLOAD_ROOT:-$HOME/ohos-firmwares}"
+if [ -z "${OHOS_SHARED_DOWNLOAD_ROOT:-}" ]; then
+    if [ -d "/data/shared/common" ]; then
+        OHOS_SHARED_DOWNLOAD_ROOT="/data/shared/common"
+    elif [ -d "/data/shared" ]; then
+        OHOS_SHARED_DOWNLOAD_ROOT="/data/shared/ohos-downloads/${USER:-$(id -un 2>/dev/null || echo user)}"
+    else
+        OHOS_SHARED_DOWNLOAD_ROOT="$HOME/.cache/ohos-downloads"
+    fi
+fi
+if [ -z "${XTS_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        XTS_DOWNLOAD_ROOT="/data/shared/common/xts_tests"
+    else
+        XTS_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/tests"
+    fi
+fi
+if [ -z "${SDK_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        SDK_DOWNLOAD_ROOT="/data/shared/common/sdk"
+    else
+        SDK_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/sdk"
+    fi
+fi
+if [ -z "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
+    if [ "$OHOS_SHARED_DOWNLOAD_ROOT" = "/data/shared/common" ]; then
+        FIRMWARE_DOWNLOAD_ROOT="/data/shared/common/firmwares"
+    else
+        FIRMWARE_DOWNLOAD_ROOT="$OHOS_SHARED_DOWNLOAD_ROOT/firmware"
+    fi
+fi
+export OHOS_CONF OHOS_USER_CONF
+export OHOS_SHARED_DOWNLOAD_ROOT XTS_DOWNLOAD_ROOT SDK_DOWNLOAD_ROOT FIRMWARE_DOWNLOAD_ROOT
 XTS_HDC_ENDPOINT="${XTS_HDC_ENDPOINT:-}"
 XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="${XTS_WINDOWS_BRIDGE_OUTPUT_ROOT:-$HOME/ohos-xts-bridge}"
 OHOS_REPO_ROOT="${OHOS_REPO_ROOT:-}"
 HDC_LIBRARY_PATH="${HDC_LIBRARY_PATH:-}"
+OHOS_DEVICE_SERVER_HOST="${OHOS_DEVICE_SERVER_HOST:-}"
+OHOS_DEVICE_SERVER_USER="${OHOS_DEVICE_SERVER_USER:-}"
+OHOS_XTS_REMOTE_EXEC="${OHOS_XTS_REMOTE_EXEC:-0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -110,6 +149,7 @@ NC='\033[0m'
 SYNC_FORCE_ENABLED=false
 LAST_STEP_LOG=""
 OHOS_ACTIVE_CHILD_PID=""
+OHOS_ACTIVE_CHILD_PGID=""
 OHOS_SIGNAL_MESSAGE_EMITTED=0
 OHOS_EXIT_CLEANUP_RAN=0
 
@@ -147,39 +187,66 @@ ohos_wait_active_child() {
         rc=$?
     fi
     OHOS_ACTIVE_CHILD_PID=""
+    OHOS_ACTIVE_CHILD_PGID=""
     return "$rc"
 }
 
 ohos_run_foreground() {
-    "$@" &
+    local detected_pgid=""
+    if has_command setsid; then
+        setsid "$@" &
+    else
+        "$@" &
+    fi
     OHOS_ACTIVE_CHILD_PID=$!
+    detected_pgid="$(ps -o pgid= -p "${OHOS_ACTIVE_CHILD_PID}" 2>/dev/null || true)"
+    OHOS_ACTIVE_CHILD_PGID="$(printf '%s' "$detected_pgid" | tr -d '[:space:]')"
+    if [ -z "${OHOS_ACTIVE_CHILD_PGID:-}" ]; then
+        OHOS_ACTIVE_CHILD_PGID="${OHOS_ACTIVE_CHILD_PID}"
+    fi
     ohos_wait_active_child
 }
 
 ohos_forward_signal() {
     local signal_name="$1"
     local pid="${OHOS_ACTIVE_CHILD_PID:-}"
+    local pgid="${OHOS_ACTIVE_CHILD_PGID:-}"
     local _attempt=0
 
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill -s "$signal_name" "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -s "$signal_name" "-$pgid" 2>/dev/null || kill -s "$signal_name" "$pid" 2>/dev/null || true
+        else
+            kill -s "$signal_name" "$pid" 2>/dev/null || true
+        fi
         for _attempt in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 OHOS_ACTIVE_CHILD_PID=""
+                OHOS_ACTIVE_CHILD_PGID=""
                 return 0
             fi
             sleep 0.1
         done
-        kill -TERM "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -TERM "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
         for _attempt in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 OHOS_ACTIVE_CHILD_PID=""
+                OHOS_ACTIVE_CHILD_PGID=""
                 return 0
             fi
             sleep 0.1
         done
-        kill -KILL "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -KILL "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        else
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
         OHOS_ACTIVE_CHILD_PID=""
+        OHOS_ACTIVE_CHILD_PGID=""
     fi
 }
 
@@ -200,6 +267,7 @@ ohos_handle_signal() {
 trap 'ohos_cleanup_once' EXIT
 trap 'ohos_handle_signal INT 130 "Script stopped by Ctrl+C."' INT
 trap 'ohos_handle_signal TERM 143 "Script stopped by SIGTERM."' TERM
+trap 'ohos_handle_signal HUP 129 "Script stopped by SIGHUP."' HUP
 
 confirm_default_yes() {
     local prompt="$1"
@@ -714,6 +782,155 @@ run_logged_command() {
     return "$rc"
 }
 
+format_duration_compact() {
+    local total="${1:-0}"
+    if [ "$total" -lt 0 ]; then
+        total=0
+    fi
+    local h=$((total / 3600))
+    local m=$(((total % 3600) / 60))
+    local s=$((total % 60))
+    if [ "$h" -gt 0 ]; then
+        printf '%dh %02dm %02ds' "$h" "$m" "$s"
+    elif [ "$m" -gt 0 ]; then
+        printf '%dm %02ds' "$m" "$s"
+    else
+        printf '%ds' "$s"
+    fi
+}
+
+render_progress_bar() {
+    local label="$1"
+    local done="$2"
+    local total="$3"
+    local start_ts="$4"
+    local width=30
+    local now elapsed pct filled eta total_estimate
+
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    if [ "$total" -le 0 ]; then
+        printf '\r[ohos] %s: %s elapsed' "$label" "$(format_duration_compact "$elapsed")"
+        return 0
+    fi
+
+    if [ "$done" -lt 0 ]; then done=0; fi
+    if [ "$done" -gt "$total" ]; then done="$total"; fi
+    pct=$((done * 100 / total))
+    filled=$((done * width / total))
+    eta="-"
+    if [ "$done" -gt 0 ] && [ "$elapsed" -gt 0 ]; then
+        total_estimate=$((elapsed * total / done))
+        eta="$(format_duration_compact "$((total_estimate - elapsed))")"
+    fi
+
+    printf '\r[ohos] %s: [' "$label"
+    printf '%*s' "$filled" '' | tr ' ' '='
+    printf '>'
+    printf '%*s' "$((width - filled))" '' | tr ' ' '.'
+    printf '] %3d%% (%d/%d) elapsed=%s eta=%s' \
+        "$pct" "$done" "$total" "$(format_duration_compact "$elapsed")" "$eta"
+}
+
+repo_project_count() {
+    local count
+    count="$(repo list 2>/dev/null | wc -l | tr -d ' ')"
+    case "$count" in
+        ''|*[!0-9]*) count=0 ;;
+    esac
+    printf '%s\n' "$count"
+}
+
+repo_sync_progress_count() {
+    local log_path="$1"
+    if [ ! -s "$log_path" ]; then
+        printf '0\n'
+        return 0
+    fi
+    grep -E '^(Fetching project|Checking out|project )' "$log_path" 2>/dev/null \
+        | sed -E 's/^Fetching project[[:space:]]+//; s/^Checking out[[:space:]]+//; s/^project[[:space:]]+//; s/[[:space:]]+.*$//; s#/$##; s#:$##' \
+        | sed '/^$/d' \
+        | sort -u \
+        | wc -l \
+        | tr -d ' '
+}
+
+lfs_progress_count() {
+    local log_path="$1"
+    if [ ! -s "$log_path" ]; then
+        printf '0\n'
+        return 0
+    fi
+    grep -E '^project[[:space:]]+' "$log_path" 2>/dev/null \
+        | awk '{print $2}' \
+        | sed -E 's#/$##' \
+        | sed '/^$/d' \
+        | sort -u \
+        | wc -l \
+        | tr -d ' '
+}
+
+run_logged_command_with_progress() {
+    local log_path="$1"
+    local label="$2"
+    local progress_kind="$3"
+    local total_hint="$4"
+    shift 4
+    local rc=0
+    local pid=0
+    local start_ts done total
+
+    total="$total_hint"
+    case "$total" in
+        ''|*[!0-9]*) total=0 ;;
+    esac
+    if [ "$total" -le 0 ]; then
+        total="$(repo_project_count)"
+    fi
+    start_ts="$(date +%s)"
+
+    "$@" >"$log_path" 2>&1 &
+    pid=$!
+
+    while kill -0 "$pid" 2>/dev/null; do
+        case "$progress_kind" in
+            repo_sync) done="$(repo_sync_progress_count "$log_path")" ;;
+            lfs_sync) done="$(lfs_progress_count "$log_path")" ;;
+            *) done=0 ;;
+        esac
+        case "$done" in
+            ''|*[!0-9]*) done=0 ;;
+        esac
+        render_progress_bar "$label" "$done" "$total" "$start_ts"
+        sleep 1
+    done
+
+    if wait "$pid"; then
+        rc=0
+    else
+        rc=$?
+    fi
+
+    case "$progress_kind" in
+        repo_sync) done="$(repo_sync_progress_count "$log_path")" ;;
+        lfs_sync) done="$(lfs_progress_count "$log_path")" ;;
+        *) done=0 ;;
+    esac
+    case "$done" in
+        ''|*[!0-9]*) done=0 ;;
+    esac
+    render_progress_bar "$label" "$done" "$total" "$start_ts"
+    printf '\n'
+
+    if [ "$rc" -ne 0 ]; then
+        err "${label} failed; tail of output:"
+        while IFS= read -r line; do
+            err "$line"
+        done < <(tail -n 60 "$log_path")
+    fi
+    return "$rc"
+}
+
 run_repo_sync_logged() {
     local log_path="$1"
     local jobs="$2"
@@ -731,7 +948,11 @@ run_repo_sync_logged() {
         cmd+=("$@")
     fi
 
-    run_logged_command "$log_path" "${cmd[@]}"
+    local total_hint=0
+    if [ $# -gt 0 ]; then
+        total_hint=$#
+    fi
+    run_logged_command_with_progress "$log_path" "repo sync" "repo_sync" "$total_hint" "${cmd[@]}"
 }
 
 collect_repo_sync_failures() {
@@ -970,7 +1191,7 @@ sync_stage_lfs() {
     local rc
 
     LAST_STEP_LOG="$(mktemp /tmp/ohos_lfs_sync_XXXXXX.log)"
-    if run_logged_command "$LAST_STEP_LOG" \
+    if run_logged_command_with_progress "$LAST_STEP_LOG" "git lfs" "lfs_sync" 0 \
         repo forall -j "$LFS_JOBS" -c \
         "git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"; then
         return 0
@@ -2074,32 +2295,69 @@ cmd_test_self_test() {
         module_name="${module_name:-$discovered_module}"
     fi
 
-    local framework_cmd=()
-    framework_cmd+=("$runner" run -p "$productform" -t UT)
+    local framework_run_args=()
+    framework_run_args+=(-p "$productform" -t UT)
     if [ -n "$subsystem_name" ]; then
-        framework_cmd+=(-ss "$subsystem_name")
+        framework_run_args+=(-ss "$subsystem_name")
     fi
     if [ "$run_all" != "true" ] && [ -n "$part_name" ]; then
-        framework_cmd+=(-tp "$part_name")
+        framework_run_args+=(-tp "$part_name")
     fi
     if [ -n "$module_name" ]; then
-        framework_cmd+=(-tm "$module_name")
+        framework_run_args+=(-tm "$module_name")
     fi
     if [ -n "$suite_name" ]; then
-        framework_cmd+=(-ts "$suite_name")
+        framework_run_args+=(-ts "$suite_name")
     fi
     if [ -n "$case_name" ]; then
-        framework_cmd+=(-tc "$case_name")
+        framework_run_args+=(-tc "$case_name")
     fi
     if [ "$coverage" = "true" ]; then
-        framework_cmd+=(-cov)
+        framework_run_args+=(-cov)
     fi
     if [ "$repeat_count" -gt 0 ]; then
-        framework_cmd+=(--repeat "$repeat_count")
+        framework_run_args+=(--repeat "$repeat_count")
     fi
 
     local summary_xml=""
     summary_xml="$(developer_test_latest_summary_xml "$runner" 2>/dev/null || true)"
+
+    info "Running developer self-test via developer_test framework"
+    local use_tdd_runner=false
+    if [ -n "$device" ] || [ -n "$explicit_hdc_path" ] || [ -n "$hdc_endpoint" ]; then
+        use_tdd_runner=true
+    fi
+    if [ "$use_tdd_runner" = "true" ]; then
+        local resolved_hdc_path=""
+        if [ -n "$explicit_hdc_path" ]; then
+            resolved_hdc_path="$explicit_hdc_path"
+        elif resolved_hdc_path="$(resolve_preferred_hdc_path 2>/dev/null)"; then
+            :
+        else
+            resolved_hdc_path="$(command -v hdc 2>/dev/null || true)"
+        fi
+        local tdd_runner_args=()
+        tdd_runner_args+=(--repo-root "$(pwd)")
+        tdd_runner_args+=(--runner-path "$runner")
+        if [ -n "$resolved_hdc_path" ]; then
+            tdd_runner_args+=(--hdc-path "$resolved_hdc_path")
+        fi
+        if [ -n "$hdc_endpoint" ]; then
+            tdd_runner_args+=(--hdc-endpoint "$hdc_endpoint")
+        fi
+        if [ -n "$device" ]; then
+            tdd_runner_args+=(--device "$device")
+        fi
+        if [ "$dry_run" = "true" ]; then
+            tdd_runner_args+=(--dry-run)
+        fi
+        tdd_runner_args+=(--framework-args "${framework_run_args[@]}")
+        run_tdd_runner_tool "${tdd_runner_args[@]}"
+        return $?
+    fi
+
+    local framework_cmd=()
+    framework_cmd+=("$runner" run "${framework_run_args[@]}")
     if [ "$dry_run" = "true" ]; then
         info "Self-test command:"
         shell_join_command "${framework_cmd[@]}"
@@ -2108,8 +2366,6 @@ cmd_test_self_test() {
         fi
         return 0
     fi
-
-    info "Running developer self-test via developer_test framework"
     ohos_run_foreground "${framework_cmd[@]}"
     if [ -n "$summary_xml" ] && [ -f "$summary_xml" ]; then
         print_developer_test_summary "$summary_xml" || true
@@ -2273,6 +2529,8 @@ cmd_config() {
     echo "  max size            : $CCACHE_MAXSIZE"
     echo ""
     echo -e "${BOLD}Download roots:${NC}"
+    echo "  shared root         : $OHOS_SHARED_DOWNLOAD_ROOT"
+    echo "  xts tests           : $XTS_DOWNLOAD_ROOT"
     echo "  sdk                 : $SDK_DOWNLOAD_ROOT"
     echo "  firmware            : $FIRMWARE_DOWNLOAD_ROOT"
     echo ""
@@ -2550,6 +2808,17 @@ run_xts_bridge_tool() {
     ohos_run_foreground python3 "$OHOS_XTS_BRIDGE_TOOL" "$@"
 }
 
+run_tdd_runner_tool() {
+    if [ ! -f "$OHOS_TDD_RUNNER_TOOL" ]; then
+        err "Missing TDD runner tool: $OHOS_TDD_RUNNER_TOOL"
+        exit 1
+    fi
+    ohos_run_foreground env \
+        PYTHONPATH="${ARKUI_XTS_SELECTOR_DIR}/src" \
+        ARKUI_XTS_SELECTOR_DIR="${ARKUI_XTS_SELECTOR_DIR}" \
+        python3 "$OHOS_TDD_RUNNER_TOOL" "$@"
+}
+
 run_device_tool() {
     if [ ! -f "$OHOS_DEVICE_TOOL" ]; then
         err "Missing device tool: $OHOS_DEVICE_TOOL"
@@ -2622,6 +2891,60 @@ xts_default_run_label() {
     printf '%s__%s\n' "$(xts_label_fragment "$user_name")" "$(xts_label_fragment "$base")"
 }
 
+xts_resolve_server_host() {
+    local value=""
+    if value="$(get_long_flag_value "--server-host" "$@" 2>/dev/null)"; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    if [ -n "${OHOS_DEVICE_SERVER_HOST:-}" ]; then
+        printf '%s\n' "${OHOS_DEVICE_SERVER_HOST}"
+        return 0
+    fi
+    return 1
+}
+
+xts_resolve_server_user() {
+    local value=""
+    if value="$(get_long_flag_value "--server-user" "$@" 2>/dev/null)"; then
+        printf '%s\n' "$value"
+        return 0
+    fi
+    if [ -n "${OHOS_DEVICE_SERVER_USER:-}" ]; then
+        printf '%s\n' "${OHOS_DEVICE_SERVER_USER}"
+        return 0
+    fi
+    if [ -n "${USER:-}" ]; then
+        printf '%s\n' "${USER}"
+        return 0
+    fi
+    if has_command id; then
+        id -un 2>/dev/null
+        return $?
+    fi
+    return 1
+}
+
+run_xts_remote_command() {
+    local subcmd="$1"
+    local server_host="$2"
+    local server_user="$3"
+    shift 3 || true
+
+    local target="$server_host"
+    if [ -n "$server_user" ]; then
+        target="${server_user}@${server_host}"
+    fi
+
+    local remote_payload=""
+    local remote_command=""
+    remote_payload="$(shell_join_command env OHOS_XTS_REMOTE_EXEC=1 bash "${SCRIPT_DIR}/ohos.sh" xts "$subcmd" "$@")"
+    remote_command="$(shell_join_command bash -lc "$remote_payload")"
+
+    info "Delegating 'ohos xts ${subcmd}' to remote execution host: ${target}"
+    ohos_run_foreground ssh "$target" "$remote_command"
+}
+
 cmd_download() {
     run_download_tool "$@"
 }
@@ -2630,6 +2953,17 @@ cmd_xts() {
     local subcmd="${1:-help}"
     if [ $# -gt 0 ]; then
         shift
+    fi
+    local xts_args=("$@")
+    local remote_server_host=""
+    local remote_server_user=""
+
+    if [ "${OHOS_XTS_REMOTE_EXEC:-0}" != "1" ] && [ "$subcmd" != "help" ] && [ "$subcmd" != "--help" ] && [ "$subcmd" != "-h" ]; then
+        if remote_server_host="$(xts_resolve_server_host "${xts_args[@]}" 2>/dev/null)"; then
+            remote_server_user="$(xts_resolve_server_user "${xts_args[@]}" 2>/dev/null || true)"
+            run_xts_remote_command "$subcmd" "$remote_server_host" "$remote_server_user" "${xts_args[@]}"
+            return $?
+        fi
     fi
 
     case "$subcmd" in
@@ -3033,6 +3367,8 @@ Subcommands:
           hdc shell aa test -b <bundle> -m <module> -s unittest OpenHarmonyTestRunner
         developer_test mode:
           test/testfwk/developer_test/start.sh run -t UT ...
+          with --device/--hdc-path/--hdc-endpoint, execution is routed through
+          an hdc-aware wrapper runner so remote endpoint + serial targeting work
       Resolution order in auto mode:
         1. explicit --bundle forces bundle mode
         2. framework-only options such as --all / --coverage / --suite / --case force developer_test mode
@@ -3257,6 +3593,10 @@ Notes:
       ohos download firmware
       ohos download list-tags
   - 'ohos xts flash' is a compatibility alias to 'ohos device flash'.
+  - Default daily download roots are shared per-user:
+      tests    -> $XTS_DOWNLOAD_ROOT
+      sdk      -> $SDK_DOWNLOAD_ROOT
+      firmware -> $FIRMWARE_DOWNLOAD_ROOT
   - If HDC needs extra shared libraries such as libusb_shared.so, set
     HDC_LIBRARY_PATH in $OHOS_CONF or let the wrapper auto-detect a common
     SDK/toolchains location.
@@ -3305,7 +3645,7 @@ Examples:
   ohos xts sdk --sdk-build-tag 20260404_120537
   ohos xts firmware --firmware-build-tag 20260404_120244
   ohos xts list-tags firmware --list-tags-count 10
-  ohos xts flash --firmware-build-tag 20260404_120244 --device <serial>
+  ohos device flash --firmware-build-tag 20260404_120244 --device <serial>
   ohos device bridge package-windows --last-report
 HELP
 }
@@ -3449,12 +3789,20 @@ while [[ "${1:-}" == --* ]]; do
             OHOS_CONF="$2"
             # shellcheck disable=SC1090
             source "$OHOS_CONF"
+            if [ -f "$OHOS_USER_CONF" ]; then
+                # shellcheck disable=SC1090
+                source "$OHOS_USER_CONF"
+            fi
             shift 2
             ;;
         --config=*)
             OHOS_CONF="${1#--config=}"
             # shellcheck disable=SC1090
             source "$OHOS_CONF"
+            if [ -f "$OHOS_USER_CONF" ]; then
+                # shellcheck disable=SC1090
+                source "$OHOS_USER_CONF"
+            fi
             shift
             ;;
         --help|-h)

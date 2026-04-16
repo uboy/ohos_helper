@@ -22,6 +22,7 @@ OHOS_DEVICE_SERVER_HOST="${OHOS_DEVICE_SERVER_HOST:-}"
 OHOS_DEVICE_SERVER_USER="${OHOS_DEVICE_SERVER_USER:-}"
 OHOS_REPO_ROOT="${OHOS_REPO_ROOT:-}"
 OHOS_DEVICE_ACTIVE_CHILD_PID=""
+OHOS_DEVICE_ACTIVE_CHILD_PGID=""
 OHOS_DEVICE_SIGNAL_MESSAGE_EMITTED=0
 
 if [ -f "$OHOS_CONF" ]; then
@@ -58,39 +59,66 @@ device_wait_active_child() {
         rc=$?
     fi
     OHOS_DEVICE_ACTIVE_CHILD_PID=""
+    OHOS_DEVICE_ACTIVE_CHILD_PGID=""
     return "$rc"
 }
 
 device_run_foreground() {
-    "$@" &
+    local detected_pgid=""
+    if has_command setsid; then
+        setsid "$@" &
+    else
+        "$@" &
+    fi
     OHOS_DEVICE_ACTIVE_CHILD_PID=$!
+    detected_pgid="$(ps -o pgid= -p "${OHOS_DEVICE_ACTIVE_CHILD_PID}" 2>/dev/null || true)"
+    OHOS_DEVICE_ACTIVE_CHILD_PGID="$(printf '%s' "$detected_pgid" | tr -d '[:space:]')"
+    if [ -z "${OHOS_DEVICE_ACTIVE_CHILD_PGID:-}" ]; then
+        OHOS_DEVICE_ACTIVE_CHILD_PGID="${OHOS_DEVICE_ACTIVE_CHILD_PID}"
+    fi
     device_wait_active_child
 }
 
 device_forward_signal() {
     local signal_name="$1"
     local pid="${OHOS_DEVICE_ACTIVE_CHILD_PID:-}"
+    local pgid="${OHOS_DEVICE_ACTIVE_CHILD_PGID:-}"
     local _attempt=0
 
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill -s "$signal_name" "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -s "$signal_name" "-$pgid" 2>/dev/null || kill -s "$signal_name" "$pid" 2>/dev/null || true
+        else
+            kill -s "$signal_name" "$pid" 2>/dev/null || true
+        fi
         for _attempt in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 OHOS_DEVICE_ACTIVE_CHILD_PID=""
+                OHOS_DEVICE_ACTIVE_CHILD_PGID=""
                 return 0
             fi
             sleep 0.1
         done
-        kill -TERM "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -TERM "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
         for _attempt in 1 2 3 4 5; do
             if ! kill -0 "$pid" 2>/dev/null; then
                 OHOS_DEVICE_ACTIVE_CHILD_PID=""
+                OHOS_DEVICE_ACTIVE_CHILD_PGID=""
                 return 0
             fi
             sleep 0.1
         done
-        kill -KILL "$pid" 2>/dev/null || true
+        if [ -n "$pgid" ] && [[ "$pgid" =~ ^[0-9]+$ ]]; then
+            kill -KILL "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        else
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
         OHOS_DEVICE_ACTIVE_CHILD_PID=""
+        OHOS_DEVICE_ACTIVE_CHILD_PGID=""
     fi
 }
 
@@ -109,6 +137,7 @@ device_handle_signal() {
 
 trap 'device_handle_signal INT 130 "Script stopped by Ctrl+C."' INT
 trap 'device_handle_signal TERM 143 "Script stopped by SIGTERM."' TERM
+trap 'device_handle_signal HUP 129 "Script stopped by SIGHUP."' HUP
 
 flash_py_has_neighbor_tool() {
     local flash_py_path="${1:-}"

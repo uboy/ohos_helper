@@ -37,6 +37,43 @@ git submodule update --init --recursive
 - `arkui-xts-selector/` - vendored selector tool
 - `gitee_util/` - vendored PR helper
 
+## Local Configuration (Not In Git)
+
+Use a local config file outside the repository for machine-specific paths:
+
+- default path: `${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf`
+- override path: set `OHOS_USER_CONF=/abs/path/to/local.conf`
+
+`ohos.sh` and `ohos_download.sh` load:
+
+1. repo config: `./ohos.conf`
+2. local config: `${OHOS_USER_CONF}` (if present)
+
+On hosts with `/data/shared/common`, defaults are:
+
+- tests: `/data/shared/common/xts_tests`
+- firmware: `/data/shared/common/firmwares`
+- sdk: `/data/shared/common/sdk`
+
+Example `${XDG_CONFIG_HOME:-$HOME/.config}/ohos/local.conf`:
+
+```bash
+# Shared root (optional)
+OHOS_SHARED_DOWNLOAD_ROOT=/data/shared/common
+
+# Explicit overrides (recommended)
+XTS_DOWNLOAD_ROOT=/data/shared/common/xts_tests
+FIRMWARE_DOWNLOAD_ROOT=/data/shared/common/firmwares
+SDK_DOWNLOAD_ROOT=/data/shared/common/sdk
+```
+
+You can verify active values with:
+
+```bash
+ohos xts help
+ohos download help
+```
+
 ## Test Modes
 
 The wrapper currently exposes four different test surfaces, and they are intentionally not treated as the same thing:
@@ -71,3 +108,16 @@ ohos xts select ./foundation/arkui/ace_engine/...
 
 - The nested tools are pinned by this repository. Update them through normal superproject commits instead of pulling them independently inside the submodule checkout.
 - Local build outputs and temporary runtime artifacts are intentionally ignored.
+
+## Sync UX
+
+`reposync` now renders compact progress with ETA for both major network-heavy stages:
+
+- `repo sync`
+- `git lfs fetch + checkout`
+
+Behavior details:
+
+- console shows a single updating progress line with elapsed time and ETA
+- on stage failure, the script prints a highlighted error and the tail of the stage log
+- full stage logs are still written under `.runtime/sync-logs/`

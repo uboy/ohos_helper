@@ -25,7 +25,9 @@ from arkui_xts_selector.daily_prebuilt import (  # noqa: E402
     DEFAULT_DAILY_CACHE_ROOT,
     DEFAULT_DAILY_COMPONENT,
     DEFAULT_FIRMWARE_COMPONENT,
+    DEFAULT_FIRMWARE_CACHE_ROOT,
     DEFAULT_SDK_COMPONENT,
+    DEFAULT_SDK_CACHE_ROOT,
     PreparedDailyArtifact,
     PreparedDailyPrebuilt,
     derive_date_from_tag,
@@ -88,7 +90,17 @@ def write_and_render_utility_report(
         print(f"{name}: {status}")
         if payload.get("error"):
             print(f"  error: {payload['error']}")
-        for key in ("tag", "component", "role", "package_kind", "archive_path", "extracted_root", "primary_root"):
+        for key in (
+            "tag",
+            "component",
+            "role",
+            "package_kind",
+            "cache_root",
+            "archive_path",
+            "extracted_root",
+            "primary_root",
+            "note",
+        ):
             value = payload.get(key)
             if value:
                 print(f"  {key}: {value}")
@@ -182,7 +194,7 @@ def prepare_sdk_from_args(args: argparse.Namespace) -> PreparedDailyArtifact:
     )
     return prepare_daily_sdk(
         build=build,
-        cache_root=args.sdk_cache_root or DEFAULT_DAILY_CACHE_ROOT,
+        cache_root=args.sdk_cache_root or DEFAULT_SDK_CACHE_ROOT,
     )
 
 
@@ -198,7 +210,7 @@ def prepare_firmware_from_args(args: argparse.Namespace) -> PreparedDailyArtifac
     )
     return prepare_daily_firmware(
         build=build,
-        cache_root=args.firmware_cache_root or DEFAULT_DAILY_CACHE_ROOT,
+        cache_root=args.firmware_cache_root or DEFAULT_FIRMWARE_CACHE_ROOT,
     )
 
 
@@ -307,12 +319,12 @@ def add_common_daily_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sdk-component", default=DEFAULT_SDK_COMPONENT)
     parser.add_argument("--sdk-branch", default="master")
     parser.add_argument("--sdk-date")
-    parser.add_argument("--sdk-cache-root", type=Path, default=DEFAULT_DAILY_CACHE_ROOT)
+    parser.add_argument("--sdk-cache-root", type=Path, default=DEFAULT_SDK_CACHE_ROOT)
     parser.add_argument("--firmware-build-tag")
     parser.add_argument("--firmware-component", default=DEFAULT_FIRMWARE_COMPONENT)
     parser.add_argument("--firmware-branch", default="master")
     parser.add_argument("--firmware-date")
-    parser.add_argument("--firmware-cache-root", type=Path, default=DEFAULT_DAILY_CACHE_ROOT)
+    parser.add_argument("--firmware-cache-root", type=Path, default=DEFAULT_FIRMWARE_CACHE_ROOT)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--progress", dest="progress", action="store_true", default=True)
