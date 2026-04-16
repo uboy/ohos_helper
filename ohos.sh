@@ -892,16 +892,36 @@ repo_project_count() {
 
 repo_sync_progress_count() {
     local log_path="$1"
+    local ratio_done=0
+    local ratio_max=0
+    local fallback_done=0
     if [ ! -s "$log_path" ]; then
         printf '0\n'
         return 0
     fi
-    grep -E '^(Fetching project|Checking out|project )' "$log_path" 2>/dev/null \
+    ratio_done="$(grep -Eo '\([0-9]+/[0-9]+\)' "$log_path" 2>/dev/null \
+        | sed -E 's/[()]//g; s#/.*$##' \
+        | sort -n \
+        | tail -n 1 \
+        | tr -d ' ')"
+    case "$ratio_done" in
+        ''|*[!0-9]*) ratio_done=0 ;;
+    esac
+    fallback_done="$(grep -E '^(Fetching project|Checking out|project )' "$log_path" 2>/dev/null \
         | sed -E 's/^Fetching project[[:space:]]+//; s/^Checking out[[:space:]]+//; s/^project[[:space:]]+//; s/[[:space:]]+.*$//; s#/$##; s#:$##' \
         | sed '/^$/d' \
         | sort -u \
         | wc -l \
-        | tr -d ' '
+        | tr -d ' ')"
+    case "$fallback_done" in
+        ''|*[!0-9]*) fallback_done=0 ;;
+    esac
+    if [ "$ratio_done" -gt "$fallback_done" ]; then
+        ratio_max="$ratio_done"
+    else
+        ratio_max="$fallback_done"
+    fi
+    printf '%s\n' "$ratio_max"
 }
 
 lfs_progress_count() {
@@ -1242,7 +1262,7 @@ sync_stage_lfs() {
     LAST_STEP_LOG="$(mktemp /tmp/ohos_lfs_sync_XXXXXX.log)"
     if run_logged_command_with_progress "$LAST_STEP_LOG" "git lfs" "lfs_sync" 0 \
         repo forall -j "$LFS_JOBS" -c \
-        "git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"; then
+        "echo project \$REPO_PATH && git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"; then
         return 0
     fi
 

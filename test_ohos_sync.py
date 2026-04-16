@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -220,6 +221,44 @@ esac
         self.assertIn("Stage failed: [3/3] prebuilts_download.sh", output)
         self.assertIn("Stage log: /tmp/ohos_prebuilts_", output)
         self.assertIn("prebuilts failed", output)
+
+    def test_sync_progress_uses_repo_ratio_and_lfs_project_markers(self):
+        self.write_fake_repo(
+            """#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    for i in $(seq 1 503); do
+      echo "proj_$i"
+    done
+    ;;
+  sync)
+    cat <<'EOF'
+Fetching projects:   6% (34/503)
+Fetching projects:  11% (60/503)
+Fetching projects: 100% (503/503), done.
+EOF
+    ;;
+  forall)
+    for i in $(seq 1 503); do
+      echo "project path/proj_$i"
+    done
+    ;;
+  *)
+    echo "unexpected repo subcommand: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+"""
+        )
+
+        result = self.run_sync("--skip-prebuilts")
+        output = self.combined_output(result)
+        normalized = output.replace("\r", "\n")
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertRegex(normalized, re.compile(r"repo sync: .*\(503/503\)"))
+        self.assertRegex(normalized, re.compile(r"git lfs: .*\(503/503\)"))
 
 
 if __name__ == "__main__":
