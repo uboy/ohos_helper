@@ -14,7 +14,21 @@ fi
 # =============================================================================
 # ohos.sh - unified OpenHarmony repo management tool
 # =============================================================================
-set -euo pipefail
+set -Eeuo pipefail
+
+CURRENT_CHAIN_STEP="${CURRENT_CHAIN_STEP:-}"
+CHAIN_ABORT_ANNOUNCED="${CHAIN_ABORT_ANNOUNCED:-false}"
+
+handle_script_error() {
+    local rc="${1:-1}"
+    if [ -n "${CURRENT_CHAIN_STEP:-}" ] && [ "${CHAIN_ABORT_ANNOUNCED:-false}" != "true" ]; then
+        CHAIN_ABORT_ANNOUNCED=true
+        err "Aborting command chain after failed step: ${CURRENT_CHAIN_STEP}"
+    fi
+    exit "$rc"
+}
+
+trap 'handle_script_error "$?"' ERR
 
 resolve_launch_script_path() {
     local raw_path="$1"
@@ -342,11 +356,18 @@ confirm_default_no() {
 run_step() {
     local label="$1"
     local rc
+    local start_ts
+    local end_ts
+    local elapsed
     shift
 
     LAST_STEP_LOG=""
+    start_ts="$(date +%s)"
     info "======== ${label} ========"
     if "$@"; then
+        end_ts="$(date +%s)"
+        elapsed=$((end_ts - start_ts))
+        info "Stage completed: ${label} (elapsed=$(format_duration_compact "$elapsed"))"
         return 0
     else
         rc=$?
@@ -357,6 +378,16 @@ run_step() {
         err "Stage log: $LAST_STEP_LOG"
     fi
     return "$rc"
+}
+
+run_chain_command() {
+    local step_name="$1"
+    shift
+    CURRENT_CHAIN_STEP="$step_name"
+    CHAIN_ABORT_ANNOUNCED=false
+    "$@"
+    CURRENT_CHAIN_STEP=""
+    CHAIN_ABORT_ANNOUNCED=false
 }
 
 is_repo_initialized() {
@@ -900,7 +931,62 @@ repo_project_count() {
     case "$count" in
         ''|*[!0-9]*) count=0 ;;
     esac
+    local manifest_count=0
+    manifest_count="$(repo_manifest_project_count)"
+    case "$manifest_count" in
+        ''|*[!0-9]*) manifest_count=0 ;;
+    esac
+    if [ "$manifest_count" -gt "$count" ]; then
+        count="$manifest_count"
+    fi
     printf '%s\n' "$count"
+}
+
+repo_manifest_project_count() {
+    local manifest_path=".repo/manifest.xml"
+    if [ ! -f "$manifest_path" ]; then
+        printf '0\n'
+        return 0
+    fi
+    if ! has_command python3; then
+        printf '0\n'
+        return 0
+    fi
+
+    python3 - "$manifest_path" <<'PY' 2>/dev/null || printf '0\n'
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+seen = set()
+
+
+def count_projects(path: str) -> int:
+    real_path = os.path.abspath(path)
+    if real_path in seen or not os.path.exists(real_path):
+        return 0
+    seen.add(real_path)
+
+    try:
+        root = ET.parse(real_path).getroot()
+    except Exception:
+        return 0
+
+    total = sum(1 for node in root.iter() if node.tag == "project")
+    base_dir = os.path.dirname(real_path)
+    for node in root.iter():
+        if node.tag != "include":
+            continue
+        name = (node.get("name") or "").strip()
+        if not name:
+            continue
+        include_path = name if os.path.isabs(name) else os.path.join(base_dir, name)
+        total += count_projects(include_path)
+    return total
+
+
+print(count_projects(sys.argv[1]))
+PY
 }
 
 repo_sync_progress_count() {
@@ -937,6 +1023,50 @@ repo_sync_progress_count() {
     printf '%s\n' "$ratio_max"
 }
 
+repo_sync_progress_snapshot() {
+    local log_path="$1"
+    local fallback_done=0
+
+    if [ ! -s "$log_path" ]; then
+        printf 'sync|0|0\n'
+        return 0
+    fi
+
+    if has_command python3; then
+        python3 - "$log_path" <<'PY' 2>/dev/null && return 0
+import re
+import sys
+
+fetch = None
+checkout = None
+
+with open(sys.argv[1], "r", encoding="utf-8", errors="ignore") as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        match = re.search(r"^Fetching projects:.*?\((\d+)/(\d+)\)", line)
+        if match:
+            fetch = (int(match.group(1)), int(match.group(2)))
+            continue
+        match = re.search(r"^Checking out projects:.*?\((\d+)/(\d+)\)", line)
+        if match:
+            checkout = (int(match.group(1)), int(match.group(2)))
+
+if checkout and fetch:
+    print(f"checkout|{checkout[0]}|{checkout[1]}")
+elif fetch:
+    print(f"fetch|{fetch[0]}|{fetch[1]}")
+else:
+    print("sync|0|0")
+PY
+    fi
+
+    fallback_done="$(repo_sync_progress_count "$log_path")"
+    case "$fallback_done" in
+        ''|*[!0-9]*) fallback_done=0 ;;
+    esac
+    printf 'sync|%s|0\n' "$fallback_done"
+}
+
 lfs_progress_count() {
     local log_path="$1"
     if [ ! -s "$log_path" ]; then
@@ -952,6 +1082,47 @@ lfs_progress_count() {
         | tr -d ' '
 }
 
+is_git_lfs_pointer_file() {
+    local file_path="$1"
+    local first_line=""
+
+    if [ ! -f "$file_path" ]; then
+        return 1
+    fi
+
+    IFS= read -r first_line < "$file_path" || true
+    [ "$first_line" = "version https://git-lfs.github.com/spec/v1" ]
+}
+
+check_critical_lfs_archives() {
+    local -a patterns=(
+        "foundation/arkui/ace_engine/frameworks/bridge/arkts_frontend/arkui_idlize/*.tgz"
+    )
+    local -a bad_files=()
+    local pattern
+    local file_path
+
+    shopt -s nullglob
+    for pattern in "${patterns[@]}"; do
+        for file_path in $pattern; do
+            if is_git_lfs_pointer_file "$file_path"; then
+                bad_files+=("$file_path")
+            fi
+        done
+    done
+    shopt -u nullglob
+
+    if [ ${#bad_files[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    err "Detected unresolved Git LFS pointer files after sync:"
+    printf '%s\n' "${bad_files[@]}" | sed 's/^/[ohos]   /' >&2
+    err "These files must be real archives before build; otherwise npm/tar may fail with TAR_BAD_ARCHIVE."
+    err "Remediation: cd foundation/arkui/ace_engine && env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs git lfs pull --include=\"frameworks/bridge/arkts_frontend/arkui_idlize/*.tgz\""
+    return 1
+}
+
 run_logged_command_with_progress() {
     local log_path="$1"
     local label="$2"
@@ -960,7 +1131,7 @@ run_logged_command_with_progress() {
     shift 4
     local rc=0
     local pid=0
-    local start_ts done total
+    local start_ts done total current_total current_label snapshot phase
 
     total="$total_hint"
     case "$total" in
@@ -991,15 +1162,34 @@ run_logged_command_with_progress() {
     fi
 
     while kill -0 "$pid" 2>/dev/null; do
+        current_label="$label"
+        current_total="$total"
         case "$progress_kind" in
-            repo_sync) done="$(repo_sync_progress_count "$log_path")" ;;
+            repo_sync)
+                snapshot="$(repo_sync_progress_snapshot "$log_path")"
+                phase="${snapshot%%|*}"
+                snapshot="${snapshot#*|}"
+                done="${snapshot%%|*}"
+                current_total="${snapshot##*|}"
+                case "$phase" in
+                    fetch) current_label="${label} (fetch)" ;;
+                    checkout) current_label="${label} (checkout)" ;;
+                    *) current_label="$label" ;;
+                esac
+                ;;
             lfs_sync) done="$(lfs_progress_count "$log_path")" ;;
             *) done=0 ;;
         esac
         case "$done" in
             ''|*[!0-9]*) done=0 ;;
         esac
-        render_progress_bar "$label" "$done" "$total" "$start_ts"
+        case "$current_total" in
+            ''|*[!0-9]*) current_total="$total" ;;
+        esac
+        if [ "$current_total" -le 0 ]; then
+            current_total="$total"
+        fi
+        render_progress_bar "$current_label" "$done" "$current_total" "$start_ts"
         sleep 1
     done
 
@@ -1009,15 +1199,42 @@ run_logged_command_with_progress() {
         rc=$?
     fi
 
+    current_label="$label"
+    current_total="$total"
     case "$progress_kind" in
-        repo_sync) done="$(repo_sync_progress_count "$log_path")" ;;
+        repo_sync)
+            snapshot="$(repo_sync_progress_snapshot "$log_path")"
+            phase="${snapshot%%|*}"
+            snapshot="${snapshot#*|}"
+            done="${snapshot%%|*}"
+            current_total="${snapshot##*|}"
+            case "$phase" in
+                fetch) current_label="${label} (fetch)" ;;
+                checkout) current_label="${label} (checkout)" ;;
+                *) current_label="$label" ;;
+            esac
+            if [ "$rc" -eq 0 ]; then
+                current_label="$label"
+                current_total="$total"
+                if [ "$current_total" -le 0 ] && [ "$done" -gt 0 ]; then
+                    current_total="$done"
+                fi
+                done="$current_total"
+            fi
+            ;;
         lfs_sync) done="$(lfs_progress_count "$log_path")" ;;
         *) done=0 ;;
     esac
     case "$done" in
         ''|*[!0-9]*) done=0 ;;
     esac
-    render_progress_bar "$label" "$done" "$total" "$start_ts"
+    case "$current_total" in
+        ''|*[!0-9]*) current_total="$total" ;;
+    esac
+    if [ "$current_total" -le 0 ]; then
+        current_total="$total"
+    fi
+    render_progress_bar "$current_label" "$done" "$current_total" "$start_ts"
     printf '\n'
 
     if [ "$rc" -ne 0 ]; then
@@ -1257,9 +1474,9 @@ sync_stage_repo() {
                 info "repo sync recovery succeeded for the failing repos."
             fi
             return 0
+        else
+            rc=$?
         fi
-
-        rc=$?
         if [ "$SYNC_FORCE_ENABLED" != "true" ]; then
             return "$rc"
         fi
@@ -1287,12 +1504,16 @@ sync_stage_repo() {
 
 sync_stage_lfs() {
     local rc
+    local lfs_env_prefix='env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs'
 
     LAST_STEP_LOG="$(mktemp /tmp/ohos_lfs_sync_XXXXXX.log)"
     if run_logged_command_with_progress "$LAST_STEP_LOG" "git lfs" "lfs_sync" 0 \
         repo forall -j "$LFS_JOBS" -c \
-        "echo project \$REPO_PATH && git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout"; then
-        return 0
+        "echo project \$REPO_PATH && ${lfs_env_prefix} git lfs fetch && ${lfs_env_prefix} git lfs checkout"; then
+        if check_critical_lfs_archives; then
+            return 0
+        fi
+        return 1
     fi
 
     rc=$?
@@ -1300,21 +1521,30 @@ sync_stage_lfs() {
 }
 
 sync_stage_prebuilts() {
+    local download_sdk="${1:-false}"
     local rc
     local npm_registry_for_sync=""
+    local -a prebuilts_args=(
+        --npm-registry "$NPM_REGISTRY"
+        --pypi-url "$PYPI_URL"
+        --trusted-host "$TRUSTED_HOST"
+        --skip-ssl
+    )
+
+    if [ "$download_sdk" = "true" ]; then
+        prebuilts_args+=(--download-sdk)
+    fi
 
     cleanup_repo_root_temp_venv
     protect_npmrc
     setup_proxy_fallback
     npm_registry_for_sync="$(registry_for_npmrc_profile "$(sync_npmrc_profile)" npm)"
+    prebuilts_args[1]="$npm_registry_for_sync"
 
     LAST_STEP_LOG="$(mktemp /tmp/ohos_prebuilts_XXXXXX.log)"
     if run_logged_command "$LAST_STEP_LOG" \
         bash build/prebuilts_download.sh \
-        --npm-registry "$npm_registry_for_sync" \
-        --pypi-url "$PYPI_URL" \
-        --trusted-host "$TRUSTED_HOST" \
-        --skip-ssl; then
+        "${prebuilts_args[@]}"; then
         rc=0
     else
         rc=$?
@@ -1390,6 +1620,7 @@ cmd_sync() {
 
     local run_lfs=true
     local run_prebuilts=true
+    local sync_download_sdk=false
 
     SYNC_FORCE_ENABLED=false
     SYNC_RAW_OUTPUT=false
@@ -1398,6 +1629,7 @@ cmd_sync() {
         case "$1" in
             -f|--force) SYNC_FORCE_ENABLED=true ;;
             --raw-output) SYNC_RAW_OUTPUT=true ;;
+            --download-sdk) sync_download_sdk=true ;;
             --skip-lfs) run_lfs=false ;;
             --skip-prebuilts) run_prebuilts=false ;;
             --repo-only)
@@ -1428,7 +1660,7 @@ cmd_sync() {
 
     if [ "$run_prebuilts" = "true" ]; then
         step=$((step + 1))
-        run_step "[$step/$total] prebuilts_download.sh" sync_stage_prebuilts
+        run_step "[$step/$total] prebuilts_download.sh" sync_stage_prebuilts "$sync_download_sdk"
     fi
 
     info "Sync complete."
@@ -2589,7 +2821,7 @@ cmd_config() {
     echo -e "${BOLD}Repo:${NC}"
     echo "  manifest URL        : $REPO_MANIFEST_URL"
     echo "  reference           : $REPO_REFERENCE"
-    echo "  LFS mirror          : $LFS_MIRROR"
+    echo "  LFS mirror          : $LFS_MIRROR (legacy/shared mirror; sync uses repo-local storage)"
     echo "  init branch         : $INIT_BRANCH"
     echo "  repo install URL    : $REPO_INSTALL_URL"
     echo ""
@@ -3437,6 +3669,7 @@ What it runs:
 Behavior:
   - If 'init' runs alone, it auto-runs 'sync' afterward for backward compatibility.
   - If 'init' is followed by another chainable command, it stops after repo init.
+  - In chained mode (`init sync build`, `sync build`, etc.), any failing step aborts the remaining steps immediately.
   - Use '--no-sync' to suppress the old auto-sync behavior explicitly.
 
 Options:
@@ -3464,13 +3697,17 @@ Preflight checks:
 
 What it runs:
   1. repo sync -j $REPO_SYNC_JOBS --optimized-fetch --current-branch --retry-fetches=5
-  2. repo forall -j $LFS_JOBS -c 'git config lfs.storage ${LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout'
+  2. repo forall -j $LFS_JOBS -c 'env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs git lfs fetch && ... git lfs checkout'
   3. bash build/prebuilts_download.sh --npm-registry "$NPM_REGISTRY" --pypi-url "$PYPI_URL" --trusted-host "$TRUSTED_HOST" --skip-ssl
 
 Notes:
   - The script swaps ~/.npmrc only for the prebuilts step, using the profile from OHOS_SYNC_NPMRC_PROFILE (default: mirror), and restores it after.
   - Proxy fallback applies only when configured.
   - If a sync stage fails, the script prints the stage name and a saved log path.
+  - On success, every stage now prints an explicit completion line so the handoff between repo sync, LFS, and prebuilts is visible.
+  - Sync-time LFS hydration uses repo-local `.git/lfs` storage and clears inherited mirror env vars that can redirect writes into shared locations.
+  - After the LFS stage, the wrapper checks critical ArkUI `.tgz` files and fails early if they are still Git LFS pointer files.
+  - --download-sdk is forwarded only to build/prebuilts_download.sh. It requests the repo-local OHOS SDK prebuilts used by some SDK packaging/integration flows and increases sync time and disk usage.
 
 Options:
   -f, --force
@@ -3478,6 +3715,9 @@ Options:
       discard local tracked/untracked changes in the failing repos before retrying.
   --raw-output
       Disable the compact progress bar and print the underlying command output directly.
+  --download-sdk
+      Pass --download-sdk to build/prebuilts_download.sh during the prebuilts stage.
+      Use this only when you specifically need repo-local SDK prebuilts in this tree.
   --skip-lfs
   --skip-prebuilts
   --repo-only
@@ -3486,6 +3726,7 @@ Examples:
   ohos sync
   ohos sync -f
   ohos sync --raw-output
+  ohos sync --download-sdk
   ohos sync build
   ohos sync --repo-only
 HELP
@@ -4150,16 +4391,16 @@ while [ $# -gt 0 ]; do
                 esac
             done
             if [ $# -eq 0 ] && [ "$init_no_sync" = "false" ]; then
-                OHOS_INIT_AUTOSYNC=1 cmd_init "${init_args[@]}"
+                OHOS_INIT_AUTOSYNC=1 run_chain_command "init" cmd_init "${init_args[@]}"
             else
-                OHOS_INIT_AUTOSYNC=0 cmd_init "${init_args[@]}"
+                OHOS_INIT_AUTOSYNC=0 run_chain_command "init" cmd_init "${init_args[@]}"
             fi
             ;;
         sync)
             sync_args=()
             while [ $# -gt 0 ] && ! is_chainable_command "$1"; do
                 case "$1" in
-                    -f|--force|--raw-output|--skip-lfs|--skip-prebuilts|--repo-only)
+                    -f|--force|--raw-output|--download-sdk|--skip-lfs|--skip-prebuilts|--repo-only)
                         sync_args+=("$1")
                         shift
                         ;;
@@ -4169,7 +4410,7 @@ while [ $# -gt 0 ]; do
                         ;;
                 esac
             done
-            cmd_sync "${sync_args[@]}"
+            run_chain_command "sync" cmd_sync "${sync_args[@]}"
             ;;
         reset)
             reset_args=()
@@ -4185,7 +4426,7 @@ while [ $# -gt 0 ]; do
                         ;;
                 esac
             done
-            cmd_reset "${reset_args[@]}"
+            run_chain_command "reset" cmd_reset "${reset_args[@]}"
             ;;
         gc)
             gc_args=()
@@ -4201,14 +4442,14 @@ while [ $# -gt 0 ]; do
                         ;;
                 esac
             done
-            cmd_gc "${gc_args[@]}"
+            run_chain_command "gc" cmd_gc "${gc_args[@]}"
             ;;
         fr|fast-rebuild)
-            cmd_fast_rebuild "$@"
+            run_chain_command "fast-rebuild" cmd_fast_rebuild "$@"
             break
             ;;
         build)
-            cmd_build "$@"
+            run_chain_command "build" cmd_build "$@"
             break
             ;;
         *)

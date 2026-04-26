@@ -99,6 +99,7 @@ def write_and_render_utility_report(
             "archive_path",
             "extracted_root",
             "primary_root",
+            "manifest_path",
             "note",
         ):
             value = payload.get(key)

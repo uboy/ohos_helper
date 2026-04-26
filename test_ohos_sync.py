@@ -353,6 +353,88 @@ esac
         self.assertIn("Fetching projects: 100% (503/503), done.", output)
         self.assertNotIn("repo sync: [", output)
 
+    def test_sync_lfs_uses_repo_local_storage_and_clears_mirror_env(self):
+        command_file = self.root / "forall_command.txt"
+        self.env["FORALL_COMMAND_FILE"] = str(command_file)
+        self.write_fake_repo(
+            """#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    echo proj_1
+    ;;
+  sync)
+    echo "Fetching projects: 100% (1/1), done."
+    ;;
+  forall)
+    shift
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "-c" ]; then
+        shift
+        printf '%s\\n' "${1:-}" > "${FORALL_COMMAND_FILE:?}"
+        echo "project path/proj_1"
+        exit 0
+      fi
+      shift
+    done
+    exit 2
+    ;;
+  *)
+    echo "unexpected repo subcommand: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+"""
+        )
+
+        result = self.run_sync("--skip-prebuilts")
+        output = self.combined_output(result)
+        command_text = command_file.read_text(encoding="utf-8")
+
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("GIT_LFS_STORAGE=.git/lfs", command_text)
+        self.assertIn("env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir", command_text)
+        self.assertNotIn("git config lfs.storage", command_text)
+
+    def test_sync_fails_when_critical_lfs_archive_is_still_pointer_file(self):
+        tgz_root = self.repo_root / "foundation" / "arkui" / "ace_engine" / "frameworks" / "bridge" / "arkts_frontend" / "arkui_idlize"
+        tgz_root.mkdir(parents=True, exist_ok=True)
+        (tgz_root / "idlizer-linux.tgz").write_text(
+            "version https://git-lfs.github.com/spec/v1\n"
+            "oid sha256:deadbeef\n"
+            "size 579123\n",
+            encoding="utf-8",
+        )
+
+        self.write_fake_repo(
+            """#!/bin/bash
+set -euo pipefail
+case "${1:-}" in
+  list)
+    echo proj_1
+    ;;
+  sync)
+    echo "Fetching projects: 100% (1/1), done."
+    ;;
+  forall)
+    echo "project foundation/arkui/ace_engine"
+    ;;
+  *)
+    echo "unexpected repo subcommand: ${1:-}" >&2
+    exit 2
+    ;;
+esac
+"""
+        )
+
+        result = self.run_sync("--skip-prebuilts")
+        output = self.combined_output(result)
+
+        self.assertNotEqual(result.returncode, 0, output)
+        self.assertIn("Detected unresolved Git LFS pointer files after sync:", output)
+        self.assertIn("idlizer-linux.tgz", output)
+        self.assertIn("TAR_BAD_ARCHIVE", output)
+
 
 if __name__ == "__main__":
     unittest.main()

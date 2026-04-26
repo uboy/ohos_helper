@@ -89,6 +89,27 @@ ohos xts help
 ohos download help
 ```
 
+## Sync Notes
+
+`ohos sync` runs three stages in order:
+
+1. `repo sync`
+2. `git lfs fetch + checkout`
+3. `build/prebuilts_download.sh`
+
+The wrapper now prints an explicit completion line after each stage, so long syncs do not look stuck at `repo sync 100%` when they are already moving on to LFS or prebuilts.
+The LFS stage now hydrates into repo-local `.git/lfs` storage instead of depending on shared mirror writes, and it fails early if critical ArkUI `.tgz` files are still Git LFS pointer files.
+
+When you chain commands such as `ohos init ... sync build rk3568`, the execution is fail-fast: if `init`, `sync`, or `build` fails, later steps are not started and the wrapper prints which chain step aborted.
+
+If you need the tree-local SDK prebuilts that some SDK packaging or integration flows expect under `prebuilts/`, use:
+
+```bash
+ohos sync --download-sdk
+```
+
+This forwards `--download-sdk` to `build/prebuilts_download.sh`. It is not the same as `ohos download sdk`, which manages shared downloaded SDK artifacts outside the tree. `--download-sdk` makes sync heavier and is unnecessary for a normal source sync/build loop.
+
 ## Test Modes
 
 The wrapper currently exposes four different test surfaces, and they are intentionally not treated as the same thing:
@@ -137,3 +158,4 @@ Behavior details:
 - on stage failure, the script prints a highlighted error and the tail of the stage log
 - full stage logs are still written under `.runtime/sync-logs/`
 - use `ohos sync --raw-output` when you want the underlying `repo` / `git lfs` output directly instead of the compact progress renderer
+- daily artifact utility reports now suppress duplicate firmware `primary_root` when it is identical to `extracted_root`, and include `manifest_path` when a firmware/SDK manifest is discovered

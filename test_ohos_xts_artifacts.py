@@ -36,6 +36,7 @@ class OhosXtsArtifactsTests(unittest.TestCase):
                             "archive_path": "/tmp/sdk.tar.gz",
                             "extracted_root": "/tmp/sdk",
                             "primary_root": "/tmp/sdk/interface/sdk-js/api",
+                            "manifest_path": "/tmp/sdk/manifest.json",
                         }
                     ),
                 ):
@@ -52,8 +53,48 @@ class OhosXtsArtifactsTests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             self.assertIn("download_daily_sdk: ready", stdout.getvalue())
+            self.assertIn("manifest_path: /tmp/sdk/manifest.json", stdout.getvalue())
             payload = json.loads(json_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["operations"]["download_daily_sdk"]["tag"], "20260410_120125")
+
+    def test_download_firmware_hides_duplicate_primary_root_in_rendered_output(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            json_path = Path(tempdir) / "report.json"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                with mock.patch.object(
+                    ohos_xts_artifacts,
+                    "prepare_firmware_from_args",
+                    return_value=_FakePrepared(
+                        {
+                            "status": "ready",
+                            "tag": "20260417_140110",
+                            "component": "dayu200",
+                            "role": "firmware",
+                            "package_kind": "image",
+                            "archive_path": "/tmp/firmware.tar.gz",
+                            "extracted_root": "/tmp/image_bundle",
+                            "primary_root": "",
+                            "manifest_path": "/tmp/image_bundle/manifest_tag.xml",
+                        }
+                    ),
+                ):
+                    rc = ohos_xts_artifacts.main(
+                        [
+                            "download",
+                            "firmware",
+                            "--firmware-build-tag",
+                            "20260417_140110",
+                            "--json-out",
+                            str(json_path),
+                        ]
+                    )
+
+            output = stdout.getvalue()
+            self.assertEqual(rc, 0)
+            self.assertIn("extracted_root: /tmp/image_bundle", output)
+            self.assertNotIn("primary_root:", output)
+            self.assertIn("manifest_path: /tmp/image_bundle/manifest_tag.xml", output)
 
     def test_flash_local_passes_paths_to_flash_image_bundle(self):
         flash_result = mock.Mock()
