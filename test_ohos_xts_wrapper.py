@@ -1,0 +1,1228 @@
+import json
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+OHOS_SH = SCRIPT_DIR / "ohos.sh"
+
+
+def run_cmd(cmd, cwd, env=None, check=True, input_text=None):
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        text=True,
+        input=input_text,
+        capture_output=True,
+        check=check,
+    )
+
+
+def write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+
+
+class OhosXtsWrapperTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+
+        self.root = Path(self.tempdir.name)
+        self.repo_root = self.root / "ohos_master"
+        self.repo_root.mkdir()
+        (self.repo_root / ".repo").mkdir()
+        (self.repo_root / "build").mkdir()
+        write_executable(
+            self.repo_root / "build" / "prebuilts_download.sh",
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "capture_path = os.environ.get('TEST_PREBUILTS_CAPTURE')\n"
+                "if capture_path:\n"
+                "    Path(capture_path).write_text(json.dumps({\n"
+                "        'argv': sys.argv[1:],\n"
+                "        'oh_venv_exists': os.path.exists('oh_venv') or os.path.islink('oh_venv'),\n"
+                "    }, indent=2), encoding='utf-8')\n"
+                "PY\n"
+            ),
+        )
+        write_executable(
+            self.repo_root / "build.sh",
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "capture_path = os.environ.get('TEST_BUILD_CAPTURE')\n"
+                "if capture_path:\n"
+                "    Path(capture_path).write_text(json.dumps({\n"
+                "        'argv': sys.argv[1:],\n"
+                "        'oh_venv_exists': os.path.exists('oh_venv') or os.path.islink('oh_venv'),\n"
+                "    }, indent=2), encoding='utf-8')\n"
+                "PY\n"
+            ),
+        )
+
+        self.selector_dir = self.root / "arkui-xts-selector"
+        (self.selector_dir / ".git").mkdir(parents=True)
+        package_dir = self.selector_dir / "src" / "arkui_xts_selector"
+        package_dir.mkdir(parents=True)
+        self.changed_file = (
+            self.repo_root
+            / "foundation"
+            / "arkui"
+            / "ace_engine"
+            / "frameworks"
+            / "bridge"
+            / "declarative_frontend"
+            / "engine"
+            / "jsi"
+            / "nativeModule"
+            / "arkts_native_common_bridge.cpp"
+        )
+        self.changed_file.parent.mkdir(parents=True, exist_ok=True)
+        self.changed_file.write_text("// test fixture\n", encoding="utf-8")
+
+        self.capture_path = self.root / "selector_capture.json"
+        self.helper_capture_path = self.root / "helper_capture.json"
+        self.bridge_capture_path = self.root / "bridge_capture.json"
+        self.download_capture_path = self.root / "download_capture.json"
+        self.artifacts_capture_path = self.root / "artifacts_capture.json"
+        self.prebuilts_capture_path = self.root / "prebuilts_capture.json"
+        self.build_capture_path = self.root / "build_capture.json"
+        self.unit_run_capture_path = self.root / "unit_run_capture.json"
+        self.tdd_capture_path = self.root / "tdd_capture.json"
+        (package_dir / "__main__.py").write_text(
+            (
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "fake_tags = [item.strip() for item in os.environ.get('TEST_SELECTOR_FAKE_TAGS', '').split(',') if item.strip()]\n"
+                "args = sys.argv[1:]\n"
+                "if '--list-daily-tags' in args and fake_tags:\n"
+                "  tag_type = args[args.index('--list-daily-tags') + 1] if args.index('--list-daily-tags') + 1 < len(args) else 'tests'\n"
+                "  print(f'Listing {len(fake_tags)} most recent {tag_type} tags (component=fake, branch=master):')\n"
+                "  for tag in fake_tags:\n"
+                "    print(f'  {tag}')\n"
+                "  sys.exit(0)\n"
+                "sleep_seconds = float(os.environ.get('TEST_SELECTOR_SLEEP', '0') or '0')\n"
+                "if sleep_seconds > 0:\n"
+                "  time.sleep(sleep_seconds)\n"
+                "capture_path = Path(os.environ['TEST_SELECTOR_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({\n"
+                "  'argv': args,\n"
+                "  'env': {\n"
+                "    'ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH': os.environ.get('ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH', ''),\n"
+                "    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),\n"
+                "  },\n"
+                "}, indent=2), encoding='utf-8')\n"
+            ),
+            encoding="utf-8",
+        )
+        (package_dir / "xts_stage.py").write_text(
+            (
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_SELECTOR_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+            encoding="utf-8",
+        )
+        self.fake_helper = self.root / "ohos-helper.py"
+        write_executable(
+            self.fake_helper,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_HELPER_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_bridge_tool = self.root / "ohos_xts_bridge.py"
+        write_executable(
+            self.fake_bridge_tool,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "import time\n"
+                "from pathlib import Path\n"
+                "sleep_seconds = float(os.environ.get('TEST_BRIDGE_SLEEP', '0') or '0')\n"
+                "if sleep_seconds > 0:\n"
+                "  time.sleep(sleep_seconds)\n"
+                "capture_path = Path(os.environ['TEST_BRIDGE_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_download_tool = self.root / "ohos_download.sh"
+        write_executable(
+            self.fake_download_tool,
+            (
+                "#!/bin/bash\n"
+                "python3 - \"$@\" <<'PY'\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "Path(os.environ['TEST_DOWNLOAD_CAPTURE']).write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+                "PY\n"
+            ),
+        )
+        self.fake_artifacts_tool = self.root / "ohos_xts_artifacts.py"
+        write_executable(
+            self.fake_artifacts_tool,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "fake_tags = [item.strip() for item in os.environ.get('TEST_SELECTOR_FAKE_TAGS', '').split(',') if item.strip()]\n"
+                "args = sys.argv[1:]\n"
+                "if len(args) >= 2 and args[0] == 'list-tags' and fake_tags:\n"
+                "  tag_type = args[1]\n"
+                "  print(f'Listing {len(fake_tags)} most recent {tag_type} tags (component=fake, branch=master):')\n"
+                "  for tag in fake_tags:\n"
+                "    print(f'  {tag}')\n"
+                "  sys.exit(0)\n"
+                "capture_path = Path(os.environ['TEST_ARTIFACTS_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({\n"
+                "  'argv': args,\n"
+                "  'env': {\n"
+                "    'ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH': os.environ.get('ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH', ''),\n"
+                "    'LD_LIBRARY_PATH': os.environ.get('LD_LIBRARY_PATH', ''),\n"
+                "    'OHOS_SHARED_DOWNLOAD_ROOT': os.environ.get('OHOS_SHARED_DOWNLOAD_ROOT', ''),\n"
+                "    'XTS_DOWNLOAD_ROOT': os.environ.get('XTS_DOWNLOAD_ROOT', ''),\n"
+                "    'SDK_DOWNLOAD_ROOT': os.environ.get('SDK_DOWNLOAD_ROOT', ''),\n"
+                "    'FIRMWARE_DOWNLOAD_ROOT': os.environ.get('FIRMWARE_DOWNLOAD_ROOT', ''),\n"
+                "  },\n"
+                "}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_ace_unittest_runner = self.root / "ace_unittest_run.py"
+        write_executable(
+            self.fake_ace_unittest_runner,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_UNIT_RUN_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+        self.fake_tdd_runner = self.root / "ohos_tdd_runner.py"
+        write_executable(
+            self.fake_tdd_runner,
+            (
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "import os\n"
+                "import sys\n"
+                "from pathlib import Path\n"
+                "capture_path = Path(os.environ['TEST_TDD_CAPTURE'])\n"
+                "capture_path.write_text(json.dumps({'argv': sys.argv[1:]}, indent=2), encoding='utf-8')\n"
+            ),
+        )
+
+        self.hdc_lib_dir = self.root / "toolchains"
+        self.hdc_lib_dir.mkdir()
+        (self.hdc_lib_dir / "libusb_shared.so").write_text("", encoding="utf-8")
+        self.fake_bin_dir = self.root / "fake-bin"
+        self.fake_bin_dir.mkdir()
+        write_executable(
+            self.fake_bin_dir / "hostname",
+            """#!/bin/bash
+case "${1:-}" in
+  -I)
+    echo "10.55.0.9 127.0.0.1"
+    ;;
+  -f)
+    echo "buildmonster1.example.net"
+    ;;
+  *)
+    echo "buildmonster1"
+    ;;
+esac
+""",
+        )
+        write_executable(
+            self.fake_bin_dir / "repo",
+            """#!/bin/bash
+if [ "${1:-}" = "sync" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "forall" ]; then
+  exit 0
+fi
+if [ "${1:-}" = "manifest" ]; then
+  exit 0
+fi
+exit 0
+""",
+        )
+
+        self.working_hdc = self.hdc_lib_dir / "hdc"
+        write_executable(
+            self.working_hdc,
+            """#!/bin/bash
+if [ "${1:-}" = "-h" ]; then
+  echo "OpenHarmony device connector(HDC)"
+  exit 0
+fi
+if [ "${1:-}" = "list" ] && [ "${2:-}" = "targets" ]; then
+  echo "SER1"
+  exit 0
+fi
+exit 0
+""",
+        )
+
+        self.broken_hdc = self.root / "broken-hdc"
+        write_executable(
+            self.broken_hdc,
+            """#!/bin/bash
+echo "error while loading shared libraries: libusb_shared.so: cannot open shared object file: No such file or directory" >&2
+exit 127
+""",
+        )
+
+        self.conf_path = self.root / "test-ohos.conf"
+        self.conf_path.write_text(
+            "\n".join(
+                [
+                    f'FLASH_PY_PATH="{self.root / "broken_flash.py"}"',
+                    f'HDC_PATH="{self.broken_hdc}"',
+                    'HDC_LIBRARY_PATH=""',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        write_executable(self.root / "broken_flash.py", "#!/usr/bin/env python3\n")
+        self.working_flash_root = self.root / "bin" / "linux"
+        self.working_flash_root.mkdir(parents=True)
+        write_executable(self.working_flash_root / "flash.py", "#!/usr/bin/env python3\n")
+        (self.working_flash_root / "bin").mkdir(parents=True, exist_ok=True)
+        write_executable(self.working_flash_root / "bin" / f"flash.{os.uname().machine}", "#!/bin/bash\nexit 0\n")
+        self.developer_test_dir = self.repo_root / "test" / "testfwk" / "developer_test"
+        self.developer_test_dir.mkdir(parents=True, exist_ok=True)
+        write_executable(
+            self.developer_test_dir / "start.sh",
+            "#!/bin/bash\nexit 0\n",
+        )
+
+        self.env = os.environ.copy()
+        self.env["PATH"] = f"{self.fake_bin_dir}:{self.hdc_lib_dir}:{self.env['PATH']}"
+        self.env["HOME"] = str(self.root)
+        self.env["OHOS_CONF"] = str(self.conf_path)
+        self.env["ARKUI_XTS_SELECTOR_DIR"] = str(self.selector_dir)
+        self.env["TEST_SELECTOR_CAPTURE"] = str(self.capture_path)
+        self.env["PYTHONDONTWRITEBYTECODE"] = "1"
+        self.feedback_dir = self.root / "feedback"
+        self.shared_prebuilts_dir = self.root / "shared-prebuilts"
+        self.shared_prebuilts_dir.mkdir()
+        self.env["OHOS_FEEDBACK_DIR"] = str(self.feedback_dir)
+        self.env["OHOS_HELPER"] = str(self.fake_helper)
+        self.env["TEST_HELPER_CAPTURE"] = str(self.helper_capture_path)
+        self.env["OHOS_XTS_BRIDGE_TOOL"] = str(self.fake_bridge_tool)
+        self.env["TEST_BRIDGE_CAPTURE"] = str(self.bridge_capture_path)
+        self.env["TEST_DOWNLOAD_CAPTURE"] = str(self.download_capture_path)
+        self.env["OHOS_XTS_ARTIFACTS_TOOL"] = str(self.fake_artifacts_tool)
+        self.env["TEST_ARTIFACTS_CAPTURE"] = str(self.artifacts_capture_path)
+        self.env["TEST_PREBUILTS_CAPTURE"] = str(self.prebuilts_capture_path)
+        self.env["TEST_BUILD_CAPTURE"] = str(self.build_capture_path)
+        self.env["SHARED_PREBUILTS_DIR"] = str(self.shared_prebuilts_dir)
+        self.env["OHOS_ACE_UNITTEST_RUNNER"] = str(self.fake_ace_unittest_runner)
+        self.env["TEST_UNIT_RUN_CAPTURE"] = str(self.unit_run_capture_path)
+        self.env["OHOS_TDD_RUNNER_TOOL"] = str(self.fake_tdd_runner)
+        self.env["TEST_TDD_CAPTURE"] = str(self.tdd_capture_path)
+        self.env["USER"] = "deviceuser"
+
+    def run_and_signal(self, cmd, env, sig):
+        proc = subprocess.Popen(
+            cmd,
+            cwd=self.repo_root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            time.sleep(0.5)
+            if sig == signal.SIGINT:
+                os.killpg(proc.pid, sig)
+            else:
+                proc.send_signal(sig)
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = proc.communicate(timeout=5)
+            self.fail(f"process did not stop after signal {sig}: stdout={stdout!r} stderr={stderr!r}")
+        return proc.returncode, stdout, stderr
+
+    def test_xts_flash_prefers_working_hdc_from_path_when_configured_binary_is_broken(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "flash",
+                "--firmware-component",
+                "dayu200",
+                "--firmware-build-tag",
+                "20260409_180241",
+                "--firmware-date",
+                "20260409",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertEqual(argv[0], "flash")
+        self.assertIn("--flash-py-path", argv)
+        self.assertIn("--hdc-path", argv)
+        flash_index = argv.index("--flash-py-path")
+        self.assertEqual(argv[flash_index + 1], str(self.working_flash_root / "flash.py"))
+        hdc_index = argv.index("--hdc-path")
+        self.assertEqual(argv[hdc_index + 1], str(self.working_hdc))
+        self.assertEqual(capture["env"]["ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH"], str(self.hdc_lib_dir))
+        self.assertTrue(capture["env"]["LD_LIBRARY_PATH"].startswith(str(self.hdc_lib_dir)))
+
+    def test_device_flash_prefers_working_hdc_from_path_when_configured_binary_is_broken(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "device",
+                "flash",
+                "--firmware-component",
+                "dayu200",
+                "--firmware-build-tag",
+                "20260409_180241",
+                "--firmware-date",
+                "20260409",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertEqual(argv[0], "flash")
+        self.assertIn("--flash-py-path", argv)
+        self.assertIn("--hdc-path", argv)
+        flash_index = argv.index("--flash-py-path")
+        self.assertEqual(argv[flash_index + 1], str(self.working_flash_root / "flash.py"))
+        hdc_index = argv.index("--hdc-path")
+        self.assertEqual(argv[hdc_index + 1], str(self.working_hdc))
+        self.assertEqual(capture["env"]["ARKUI_XTS_SELECTOR_HDC_LIBRARY_PATH"], str(self.hdc_lib_dir))
+        self.assertTrue(capture["env"]["LD_LIBRARY_PATH"].startswith(str(self.hdc_lib_dir)))
+
+    def test_xts_select_infers_changed_file_from_positional_path(self):
+        relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "select",
+                relative_changed_file,
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--changed-file", argv)
+        changed_file_index = argv.index("--changed-file")
+        self.assertEqual(argv[changed_file_index + 1], relative_changed_file)
+        self.assertNotIn("--pr-url", argv)
+        self.assertIn("--top-projects", argv)
+        self.assertIn("--run-label", argv)
+
+    def test_xts_stage_infers_report_path_from_positional_argument(self):
+        report_path = self.repo_root / "selector_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(report_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--from-report", str(report_path)])
+
+    def test_xts_stage_infers_selected_tests_json_from_positional_argument(self):
+        selected_tests_path = self.repo_root / "selected_tests.json"
+        selected_tests_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(selected_tests_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--selected-tests-json", str(selected_tests_path)])
+
+    def test_feedback_saves_markdown_entry(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "feedback",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+            input_text="Tester\nXTS UX\nPlease make select output shorter.\n.\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved = sorted(self.feedback_dir.glob("*.md"))
+        self.assertEqual(len(saved), 1)
+        content = saved[0].read_text(encoding="utf-8")
+        self.assertIn("Author: Tester", content)
+        self.assertIn("Topic: XTS UX", content)
+        self.assertIn("Please make select output shorter.", content)
+        self.assertIn("Suggested Clone: git clone --recurse-submodules", content)
+
+    def test_help_xts_documents_remote_device_access(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "xts",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos device help", result.stdout)
+        self.assertIn("ohos device bridge help", result.stdout)
+        self.assertIn("ohos download list-tags", result.stdout)
+        self.assertIn("git submodule update --init --recursive", result.stdout)
+        self.assertNotIn('git -C "', result.stdout)
+        self.assertNotIn("Remote device on another PC:", result.stdout)
+
+    def test_xts_stage_accepts_submodule_style_git_file(self):
+        shutil.rmtree(self.selector_dir / ".git")
+        (self.selector_dir / ".git").write_text("gitdir: /tmp/fake-submodule-gitdir\n", encoding="utf-8")
+        report_path = self.repo_root / "selector_report.json"
+        report_path.write_text("{}", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "stage",
+                str(report_path),
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--from-report", str(report_path)])
+
+    def test_help_npmrc_mentions_profiles(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "npmrc",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos npmrc [mirror|original]", result.stdout)
+        self.assertIn("OHOS_SYNC_NPMRC_PROFILE", result.stdout)
+
+    def test_help_build_mentions_requested_target_examples(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "build",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "ohos build rk3568 --no-prebuilt-sdk --build-target linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build all Linux-host ace_engine unit tests.",
+            result.stdout,
+        )
+        self.assertIn(
+            "Run them afterward with: ohos run ut ace_engine_linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos fr rk3568 --no-prebuilt-sdk --build-target linux_unittest",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --no-prebuilt-sdk --build-target run_linux_unittest_capi",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build and immediately run the Linux CAPI ace_engine unit tests.",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --build-target ace_engine",
+            result.stdout,
+        )
+        self.assertIn(
+            "ohos build rk3568 --build-target ace_engine_test",
+            result.stdout,
+        )
+        self.assertIn(
+            "Build the generated aggregate ace_engine test target.",
+            result.stdout,
+        )
+        self.assertIn(
+            "it pulls the ace_engine part itself plus the ace_engine unittest and benchmark targets.",
+            result.stdout,
+        )
+        self.assertIn(
+            "--no-prebuilt-sdk skips the ohos-sdk prebuild stage.",
+            result.stdout,
+        )
+        self.assertIn(
+            "This adds --fast-rebuild and skips prepare/preloader/gn_gen",
+            result.stdout,
+        )
+        self.assertIn(
+            "Add --no-prebuilt-sdk if you want a faster local part build",
+            result.stdout,
+        )
+
+    def test_sync_prebuilts_removes_stale_repo_root_oh_venv(self):
+        stale_venv = self.repo_root / "oh_venv"
+        (stale_venv / "bin").mkdir(parents=True)
+        (stale_venv / "bin" / "python3").write_text("", encoding="utf-8")
+        (stale_venv / "pyvenv.cfg").write_text("home = /tmp/python\n", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "sync",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.prebuilts_capture_path.read_text(encoding="utf-8"))
+        self.assertFalse(capture["oh_venv_exists"])
+        self.assertFalse(stale_venv.exists())
+        self.assertIn("Removing stale temporary Python venv", result.stdout)
+
+    def test_build_removes_stale_repo_root_oh_venv_before_build_sh(self):
+        stale_venv = self.repo_root / "oh_venv"
+        (stale_venv / "bin").mkdir(parents=True)
+        (stale_venv / "bin" / "python3").write_text("", encoding="utf-8")
+        (stale_venv / "pyvenv.cfg").write_text("home = /tmp/python\n", encoding="utf-8")
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "build",
+                "rk3568",
+                "--build-target",
+                "ace_engine",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.build_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            capture["argv"],
+            ["--product-name", "rk3568", "--ccache", "--build-target", "ace_engine"],
+        )
+        self.assertFalse(capture["oh_venv_exists"])
+        self.assertFalse(stale_venv.exists())
+        self.assertIn("Removing stale temporary Python venv", result.stdout)
+
+    def test_help_run_documents_ace_engine_linux_unittest_wrappers(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "run",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos run ut ace_engine_capi", result.stdout)
+        self.assertIn("ohos run ut ace_engine_linux_unittest", result.stdout)
+        self.assertIn("These are local Linux-host gtest binaries", result.stdout)
+        self.assertIn("They are not XTS/device tests.", result.stdout)
+        self.assertIn("python3", result.stdout)
+        self.assertIn("--path C-API-Main", result.stdout)
+        self.assertIn("base, capi, core, core/pipeline", result.stdout)
+
+    def test_run_ut_ace_engine_capi_routes_to_runner_with_capi_path(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "run",
+                "ut",
+                "ace_engine_capi",
+                "--debug",
+                "-j",
+                "8",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.unit_run_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["--path", "C-API-Main", "--debug", "-j", "8"])
+        self.assertIn("Running ace_engine Linux CAPI unit tests", result.stdout)
+
+    def test_run_ut_ace_engine_linux_unittest_routes_to_runner(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "run",
+                "ut",
+                "ace_engine_linux_unittest",
+                "-j",
+                "16",
+                "--output",
+                "out/ace_linux_ut.json",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.unit_run_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["-j", "16", "--output", "out/ace_linux_ut.json"])
+        self.assertIn("Running all ace_engine Linux-host unit tests", result.stdout)
+
+    def test_npmrc_original_profile_shows_public_registries(self):
+        env = self.env.copy()
+        env["ORIGINAL_KOALA_NPM_REGISTRY"] = "https://nexus.example/koala/"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "npmrc",
+                "original",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Generated .npmrc profile:", result.stdout)
+        self.assertIn("registry=https://repo.huaweicloud.com/repository/npm/", result.stdout)
+        self.assertIn("@ohos:registry=https://repo.harmonyos.com/npm/", result.stdout)
+        self.assertIn("@koalaui:registry=https://nexus.example/koala/", result.stdout)
+        self.assertIn("ohpm registry       : https://repo.harmonyos.com/ohpm/", result.stdout)
+
+    def test_npmrc_mirror_profile_stays_default_for_sync(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "npmrc",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Generated .npmrc profile:", result.stdout)
+        self.assertIn("mirror", result.stdout)
+        self.assertIn("uses the 'mirror' profile during sync/build", result.stdout)
+        self.assertIn("registry=http://tsnnlx12bs02.ad.telmast.com:8081/repository/huaweicloud", result.stdout)
+
+    def test_xts_sdk_alias_routes_to_download_tool(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_TOOL"] = str(self.fake_download_tool)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "sdk",
+                "--sdk-build-tag",
+                "20260410_120125",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.download_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["sdk", "--sdk-build-tag", "20260410_120125"])
+        self.assertIn("compatibility alias", result.stdout + result.stderr)
+
+    def test_xts_list_tags_alias_routes_to_download_tool(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_TOOL"] = str(self.fake_download_tool)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "list-tags",
+                "firmware",
+                "--list-tags-count",
+                "10",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.download_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["list-tags", "firmware", "--list-tags-count", "10"])
+        self.assertIn("compatibility alias", result.stdout + result.stderr)
+
+    def test_help_device_documents_remote_device_access(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "device",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("device - standalone device access and bridge helper", result.stdout)
+        self.assertIn("Linux test server:", result.stdout)
+        self.assertIn("Device host:", result.stdout)
+        self.assertIn("Run on the Linux PC with the USB-connected device:", result.stdout)
+        self.assertIn("Run on the Windows PC with the USB-connected device:", result.stdout)
+        self.assertIn("auto-detects the Linux test server IP and current user", result.stdout)
+        self.assertIn("--hdc-endpoint 127.0.0.1:28710", result.stdout)
+        self.assertIn("ohos device flash --firmware-component dayu200", result.stdout)
+
+    def test_device_bridge_help_explains_host_roles_and_auto_detection(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "device",
+                "bridge",
+                "help",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Linux test server:", result.stdout)
+        self.assertIn("Windows device host:", result.stdout)
+        self.assertIn("If '--server-host' is omitted", result.stdout)
+        self.assertIn("ohos device bridge package-windows --last-report", result.stdout)
+        self.assertIn("stop_hdc_bridge.ps1 -StopHdcServer", result.stdout)
+
+    def test_device_bridge_package_windows_auto_detects_server_host_and_user(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "device",
+                "bridge",
+                "package-windows",
+                "--last-report",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.bridge_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertEqual(argv[0], "package-windows")
+        self.assertIn("--server-host", argv)
+        self.assertIn("--server-user", argv)
+        self.assertIn("--output-dir", argv)
+        self.assertIn("--run-store-root", argv)
+        self.assertIn("--last-report", argv)
+        self.assertEqual(argv[argv.index("--server-host") + 1], "10.55.0.9")
+        self.assertEqual(argv[argv.index("--server-user") + 1], "deviceuser")
+        self.assertIn("Auto-detected Linux test server address: 10.55.0.9", result.stdout)
+        self.assertIn("Auto-detected Linux test server user: deviceuser", result.stdout)
+        self.assertIn("Run the ZIP on the Windows PC with the USB-connected device", result.stdout)
+
+    def test_download_menu_selects_sdk_and_tag_then_runs_download(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_MENU_FORCE"] = "1"
+        env["TEST_SELECTOR_FAKE_TAGS"] = "20260410_120537,20260409_120125"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+            input_text="\x1b[B\n\x1b[B\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertEqual(argv[0], "download")
+        self.assertEqual(argv[1], "sdk")
+        self.assertIn("--sdk-build-tag", argv)
+        self.assertEqual(argv[argv.index("--sdk-build-tag") + 1], "20260409_120125")
+
+    def test_download_tests_uses_shared_common_roots_by_default(self):
+        env = self.env.copy()
+        env.pop("OHOS_SHARED_DOWNLOAD_ROOT", None)
+        env.pop("XTS_DOWNLOAD_ROOT", None)
+        env.pop("SDK_DOWNLOAD_ROOT", None)
+        env.pop("FIRMWARE_DOWNLOAD_ROOT", None)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+                "tests",
+                "--daily-build-tag",
+                "20260410_120510",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--daily-cache-root", argv)
+        self.assertEqual(argv[argv.index("--daily-cache-root") + 1], "/data/shared/common/xts_tests")
+        self.assertIn("--sdk-cache-root", argv)
+        self.assertEqual(argv[argv.index("--sdk-cache-root") + 1], "/data/shared/common/sdk")
+        self.assertIn("--firmware-cache-root", argv)
+        self.assertEqual(argv[argv.index("--firmware-cache-root") + 1], "/data/shared/common/firmwares")
+
+    def test_download_roots_follow_user_local_conf_overrides(self):
+        local_conf = self.root / ".config" / "ohos" / "local.conf"
+        local_conf.parent.mkdir(parents=True, exist_ok=True)
+        local_conf.write_text(
+            "\n".join(
+                [
+                    'OHOS_SHARED_DOWNLOAD_ROOT="/tmp/shared-root-unused"',
+                    f'XTS_DOWNLOAD_ROOT="{self.root / "custom-xts"}"',
+                    f'SDK_DOWNLOAD_ROOT="{self.root / "custom-sdk"}"',
+                    f'FIRMWARE_DOWNLOAD_ROOT="{self.root / "custom-firmware"}"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        env = self.env.copy()
+        env["OHOS_USER_CONF"] = str(local_conf)
+        env.pop("OHOS_SHARED_DOWNLOAD_ROOT", None)
+        env.pop("XTS_DOWNLOAD_ROOT", None)
+        env.pop("SDK_DOWNLOAD_ROOT", None)
+        env.pop("FIRMWARE_DOWNLOAD_ROOT", None)
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+                "firmware",
+                "--firmware-build-tag",
+                "20260410_120244",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.artifacts_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--daily-cache-root", argv)
+        self.assertEqual(argv[argv.index("--daily-cache-root") + 1], str(self.root / "custom-xts"))
+        self.assertIn("--sdk-cache-root", argv)
+        self.assertEqual(argv[argv.index("--sdk-cache-root") + 1], str(self.root / "custom-sdk"))
+        self.assertIn("--firmware-cache-root", argv)
+        self.assertEqual(argv[argv.index("--firmware-cache-root") + 1], str(self.root / "custom-firmware"))
+
+    def test_help_download_uses_extracted_tool(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("download - download daily prebuilt SDK, firmware or XTS test packages", result.stdout)
+        self.assertIn("ohos download tests 20260404_120510", result.stdout)
+        self.assertIn("XTS      →", result.stdout)
+        self.assertIn("/xts_tests", result.stdout)
+
+    def test_help_xts_recommends_device_flash_command(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "help",
+                "xts",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ohos device flash --firmware-build-tag", result.stdout)
+        self.assertNotIn("ohos xts flash --firmware-build-tag", result.stdout)
+
+    def test_self_test_developer_framework_uses_tdd_runner_for_remote_device(self):
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "test",
+                "self-test",
+                "--framework",
+                "developer_test",
+                "--all",
+                "--hdc-endpoint",
+                "127.0.0.1:28710",
+                "--device",
+                "SER123456",
+                "--dry-run",
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.tdd_capture_path.read_text(encoding="utf-8"))
+        argv = capture["argv"]
+        self.assertIn("--repo-root", argv)
+        self.assertEqual(argv[argv.index("--repo-root") + 1], str(self.repo_root))
+        self.assertIn("--runner-path", argv)
+        self.assertEqual(argv[argv.index("--runner-path") + 1], str(self.developer_test_dir / "start.sh"))
+        self.assertIn("--hdc-endpoint", argv)
+        self.assertEqual(argv[argv.index("--hdc-endpoint") + 1], "127.0.0.1:28710")
+        self.assertIn("--device", argv)
+        self.assertEqual(argv[argv.index("--device") + 1], "SER123456")
+        self.assertIn("--framework-args", argv)
+        self.assertIn("-p", argv)
+        self.assertIn("phone", argv)
+        self.assertIn("-t", argv)
+        self.assertIn("UT", argv)
+        self.assertIn("--dry-run", argv)
+
+    def test_download_menu_escape_cancels_cleanly(self):
+        env = self.env.copy()
+        env["OHOS_DOWNLOAD_MENU_FORCE"] = "1"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "download",
+            ],
+            cwd=self.repo_root,
+            env=env,
+            check=False,
+            input_text="\x1b",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Download cancelled.", result.stdout + result.stderr)
+        self.assertFalse(self.capture_path.exists())
+
+    def test_info_file_positional_mode_routes_to_file_helper(self):
+        relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "info",
+                "file",
+                relative_changed_file,
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.helper_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["file", relative_changed_file])
+
+    def test_info_existing_file_path_routes_to_file_helper(self):
+        relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"
+
+        result = run_cmd(
+            [
+                "bash",
+                str(OHOS_SH),
+                "info",
+                relative_changed_file,
+            ],
+            cwd=self.repo_root,
+            env=self.env,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        capture = json.loads(self.helper_capture_path.read_text(encoding="utf-8"))
+        self.assertEqual(capture["argv"], ["file", relative_changed_file])
+
+    def test_xts_select_sigterm_prints_clear_stop_message(self):
+        relative_changed_file = f"./{self.changed_file.relative_to(self.repo_root)}"
+        env = self.env.copy()
+        env["TEST_SELECTOR_SLEEP"] = "30"
+
+        returncode, stdout, stderr = self.run_and_signal(
+            [
+                "bash",
+                str(OHOS_SH),
+                "xts",
+                "select",
+                relative_changed_file,
+            ],
+            env,
+            signal.SIGTERM,
+        )
+
+        self.assertEqual(returncode, 143, stderr)
+        self.assertIn("Script stopped by SIGTERM.", stdout + stderr)
+
+    def test_device_bridge_sigint_prints_clear_stop_message(self):
+        env = self.env.copy()
+        env["TEST_BRIDGE_SLEEP"] = "30"
+
+        returncode, stdout, stderr = self.run_and_signal(
+            [
+                "bash",
+                str(OHOS_SH),
+                "device",
+                "bridge",
+                "package-windows",
+                "--last-report",
+            ],
+            env,
+            signal.SIGINT,
+        )
+
+        self.assertEqual(returncode, 130, stderr)
+        self.assertIn("Script stopped by Ctrl+C.", stdout + stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
