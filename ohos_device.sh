@@ -65,6 +65,12 @@ if [ -f "$OHOS_CONF" ]; then
     source "$OHOS_CONF"
 fi
 
+OHOS_SHARED_ENV="${SCRIPT_DIR}/ohos-shared-env.sh"
+if [ -f "$OHOS_SHARED_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_SHARED_ENV"
+fi
+
 if [ -f "$OHOS_XTS_RUNTIME_LIB" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_XTS_RUNTIME_LIB"
