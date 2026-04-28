@@ -103,6 +103,13 @@ if [ -f "$OHOS_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_CONF"
 fi
+
+OHOS_SHARED_ENV="${SCRIPT_DIR}/ohos-shared-env.sh"
+if [ -f "$OHOS_SHARED_ENV" ]; then
+    # shellcheck disable=SC1090
+    source "$OHOS_SHARED_ENV"
+fi
+
 if [ -f "$OHOS_USER_CONF" ]; then
     # shellcheck disable=SC1090
     source "$OHOS_USER_CONF"
@@ -1123,6 +1130,42 @@ check_critical_lfs_archives() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# git-lfs 3.0.2 (Ubuntu 22.04, cannot upgrade) has a path-resolution bug:
+# when lfs.storage ends with "/lfs/objects", git-lfs appends another
+# "objects/" internally, resolving to ".../lfs/objects/objects" instead of
+# ".../lfs/objects".  This causes mkdir permission failures during checkout
+# when the double-objects path is owned by another user.
+#
+# The fix is to strip the trailing "/objects" so git-lfs resolves correctly
+# to ".../lfs/objects".  Safe to remove when git-lfs >= 3.1 is available.
+# ---------------------------------------------------------------------------
+fix_lfs_storage() {
+    local config fixed=0 total=0
+    local storage
+
+    for config in .repo/projects/*/config; do
+        [ -f "$config" ] || continue
+        total=$((total + 1))
+        storage="$(git config -f "$config" --get lfs.storage 2>/dev/null)" || continue
+        if [ -z "$storage" ]; then
+            continue
+        fi
+        case "$storage" in
+            */lfs/objects)
+                git config -f "$config" lfs.storage "${storage%/objects}"
+                fixed=$((fixed + 1))
+                ;;
+        esac
+    done
+
+    if [ "$fixed" -gt 0 ]; then
+        info "Fixed lfs.storage in ${fixed}/${total} project configs (stripped trailing /objects for git-lfs 3.0.2 compat)."
+    else
+        warn "fix_lfs_storage: no configs with buggy /lfs/objects pattern found (checked ${total} repos)."
+    fi
+}
+
 run_logged_command_with_progress() {
     local log_path="$1"
     local label="$2"
@@ -1337,7 +1380,9 @@ force_clean_repo_path() {
     git -C "$repo_path" rebase --abort >/dev/null 2>&1 || true
     git -C "$repo_path" merge --abort >/dev/null 2>&1 || true
     git -C "$repo_path" am --abort >/dev/null 2>&1 || true
-    git -C "$repo_path" reset --hard HEAD
+    # Skip LFS smudge during reset to avoid "filter-process died of signal" errors.
+    # LFS checkout will be handled separately by sync_stage_lfs or LFS recovery.
+    git -C "$repo_path" -c lfs.fetchexclude="*" reset --hard HEAD
     git -C "$repo_path" clean -ffdx
 }
 
@@ -1467,6 +1512,8 @@ sync_stage_repo() {
     local -a target_paths=()
     local -a parsed_paths=()
 
+    fix_lfs_storage
+
     while true; do
         LAST_STEP_LOG="$(mktemp /tmp/ohos_repo_sync_XXXXXX.log)"
         if run_repo_sync_logged "$LAST_STEP_LOG" "$jobs" "$fail_fast" "${target_paths[@]}"; then
@@ -1477,6 +1524,40 @@ sync_stage_repo() {
         else
             rc=$?
         fi
+
+        # Detect LFS smudge filter failures in the sync log and attempt
+        # targeted recovery before falling through to force-mode retry.
+        # The common pattern is "git-lfs filter-process --skip died of
+        # signal 15" which leaves .tgz files as pointer stubs and causes
+        # checkout to fail.  Running "git lfs checkout" for those repos
+        # resolves the pointers from the local LFS mirror without
+        # re-downloading.
+        if grep -q 'git-lfs filter-process.*died of signal\|smudge filter lfs failed\|lfs.*failed' "$LAST_STEP_LOG" 2>/dev/null; then
+            mapfile -t _lfs_failed_paths < <(collect_repo_sync_failures "$LAST_STEP_LOG")
+            if [ ${#_lfs_failed_paths[@]} -gt 0 ]; then
+                local _lfs_repo
+                info "Detected Git LFS smudge failures; attempting targeted LFS checkout for ${#_lfs_failed_paths[@]} repo(s):"
+                printf '%s\n' "${_lfs_failed_paths[@]}" | sed 's/^/[ohos]   /' >&2
+                for _lfs_repo in "${_lfs_failed_paths[@]}"; do
+                    if [ -d "$_lfs_repo" ] && git -C "$_lfs_repo" rev-parse --git-dir >/dev/null 2>&1; then
+                        info "  LFS checkout: $_lfs_repo"
+                        local _lfs_env='env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs'
+                        # First try to fetch from mirror, then checkout
+                        (cd "$_lfs_repo" && eval "${_lfs_env}" git lfs fetch --all 2>&1 && eval "${_lfs_env}" git lfs checkout 2>&1) || true
+                    fi
+                done
+
+                # Re-run repo sync only for the recovered repos
+                info "Re-running repo sync for LFS-recovered repos..."
+                LAST_STEP_LOG="$(mktemp /tmp/ohos_repo_sync_XXXXXX.log)"
+                if run_repo_sync_logged "$LAST_STEP_LOG" 1 true "${_lfs_failed_paths[@]}"; then
+                    info "repo sync recovery after LFS fix succeeded."
+                    return 0
+                fi
+                rc=$?
+            fi
+        fi
+
         if [ "$SYNC_FORCE_ENABLED" != "true" ]; then
             return "$rc"
         fi
