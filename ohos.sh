@@ -1706,6 +1706,10 @@ cmd_init() {
             info "Removing stale out/ directory (build artifacts from previous init)."
             rm -rf out
         fi
+        if [ -d "prebuilts" ]; then
+            info "Removing stale prebuilts/ directory (will be re-synced)."
+            rm -rf prebuilts
+        fi
     fi
 
     local manifest_arg=""
