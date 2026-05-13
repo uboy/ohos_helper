@@ -1761,7 +1761,9 @@ cmd_sync() {
     # Single/multi-project sync: repo sync only those projects
     if [ ${#sync_projects[@]} -gt 0 ]; then
         local -a resolved_paths
-        mapfile -t resolved_paths < <(resolve_repo_paths "${sync_projects[@]}") || return 1
+        resolved_paths_str="$(resolve_repo_paths "${sync_projects[@]}")" || return 1
+        [ -n "$resolved_paths_str" ] || { err "no paths resolved"; return 1; }
+        mapfile -t resolved_paths <<< "$resolved_paths_str"
         info "repo sync for ${#resolved_paths[@]} project(s): ${resolved_paths[*]}"
         repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch --retry-fetches=5 "${resolved_paths[@]}"
         local sync_rc=$?
@@ -1832,7 +1834,9 @@ cmd_reset() {
     # Single-project reset mode
     if [ ${#reset_projects[@]} -eq 1 ]; then
         local -a resolved_paths
-        mapfile -t resolved_paths < <(resolve_repo_paths "${reset_projects[0]}") || exit 1
+        resolved_paths_str="$(resolve_repo_paths "${reset_projects[0]}")" || exit 1
+        [ -n "$resolved_paths_str" ] || { err "no paths resolved"; exit 1; }
+        mapfile -t resolved_paths <<< "$resolved_paths_str"
         local project="${resolved_paths[0]}"
 
         info "Resetting single project: $project"
