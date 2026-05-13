@@ -39,6 +39,7 @@ from arkui_xts_selector.daily_prebuilt import (  # noqa: E402
     resolve_daily_build,
 )
 from arkui_xts_selector.flashing import flash_image_bundle  # noqa: E402
+from arkui_xts_selector.utility_modes import write_and_render_utility_report as _render_report  # noqa: E402
 
 
 def emit_progress(enabled: bool, message: str) -> None:
@@ -55,64 +56,6 @@ def emit_subprogress(enabled: bool, label: str, message: str) -> None:
     text = " ".join(str(message).strip().split())
     if text:
         print(f"{label}: {text}")
-
-
-def resolve_json_output_path(path_value: str | None) -> Path:
-    if path_value:
-        return Path(path_value).expanduser().resolve()
-    return (Path.cwd() / DEFAULT_REPORT_FILE).resolve()
-
-
-def write_json_report(report: dict[str, Any], json_to_stdout: bool, json_output_path: Path | None) -> Path | None:
-    if json_to_stdout:
-        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
-        sys.stdout.write("\n")
-        return None
-
-    target = resolve_json_output_path(str(json_output_path) if json_output_path else None)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return target
-
-
-def write_and_render_utility_report(
-    report: dict[str, Any],
-    *,
-    json_to_stdout: bool,
-    json_output_path: Path | None,
-) -> None:
-    written_json_path = write_json_report(report, json_to_stdout=json_to_stdout, json_output_path=json_output_path)
-    if json_to_stdout:
-        return
-    print("utility_mode: daily_artifacts")
-    for name, payload in report.get("operations", {}).items():
-        status = payload.get("status", "")
-        print(f"{name}: {status}")
-        if payload.get("error"):
-            print(f"  error: {payload['error']}")
-        for key in (
-            "tag",
-            "component",
-            "role",
-            "package_kind",
-            "cache_root",
-            "archive_path",
-            "extracted_root",
-            "manifest_path",
-            "note",
-        ):
-            value = payload.get(key)
-            if value:
-                print(f"  {key}: {value}")
-        manifest_hint = payload.get("manifest_path")
-        if manifest_hint:
-            print(f"  hint: ohos init -m {manifest_hint} sync build rk3568")
-        if payload.get("output_tail"):
-            print("  output_tail:")
-            for line in str(payload["output_tail"]).splitlines():
-                print(f"    {line}")
-    if written_json_path is not None:
-        print(f"json_output_path: {written_json_path}")
 
 
 def run_list_tags_mode(args: argparse.Namespace) -> int:
@@ -256,7 +199,7 @@ def run_download_mode(args: argparse.Namespace) -> int:
         report["operations"][f"download_daily_{args.download_type}"] = {"status": "failed", "error": str(exc)}
         exit_code = 2
 
-    write_and_render_utility_report(report, json_to_stdout=args.json, json_output_path=args.json_out)
+    _render_report(report, json_to_stdout=args.json, json_output_path=args.json_out)
     return exit_code
 
 
@@ -308,7 +251,7 @@ def run_flash_mode(args: argparse.Namespace) -> int:
         report["operations"][operation_name] = payload
         exit_code = 2
 
-    write_and_render_utility_report(report, json_to_stdout=args.json, json_output_path=args.json_out)
+    _render_report(report, json_to_stdout=args.json, json_output_path=args.json_out)
     return exit_code
 
 
