@@ -98,13 +98,15 @@ def write_and_render_utility_report(
             "cache_root",
             "archive_path",
             "extracted_root",
-            "primary_root",
             "manifest_path",
             "note",
         ):
             value = payload.get(key)
             if value:
                 print(f"  {key}: {value}")
+        manifest_hint = payload.get("manifest_path")
+        if manifest_hint:
+            print(f"  hint: ohos init -m {manifest_hint} sync build rk3568")
         if payload.get("output_tail"):
             print("  output_tail:")
             for line in str(payload["output_tail"]).splitlines():

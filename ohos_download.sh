@@ -362,8 +362,16 @@ download_collect_recent_tags() {
     local trimmed=""
     local candidate=""
     local line=""
+    local label=""
+    case "$subcmd" in
+        tests) label="XTS tests" ;;
+        sdk)   label="SDK" ;;
+        firmware) label="firmware" ;;
+        *)    label="$subcmd" ;;
+    esac
 
     DOWNLOAD_MENU_TAGS=()
+    info "Fetching recent ${label} build tags..."
     if ! output="$(run_xts_artifacts_tool list-tags "$subcmd" "$@" 2>&1)"; then
         printf '%s\n' "$output" >&2
         return 1
