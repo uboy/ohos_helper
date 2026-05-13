@@ -1702,6 +1702,10 @@ cmd_init() {
     ensure_repo_available
     if [ -d ".repo" ]; then
         warn "Directory already contains .repo/ - re-initializing."
+        if [ -d "out" ]; then
+            info "Removing stale out/ directory (build artifacts from previous init)."
+            rm -rf out
+        fi
     fi
 
     local manifest_arg=""
