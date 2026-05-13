@@ -996,6 +996,28 @@ print(count_projects(sys.argv[1]))
 PY
 }
 
+# Resolve project name(s) to repo checkout path(s).
+# If arg is already a valid directory, pass through.
+# Otherwise, look up via "repo list" to map project name -> path.
+resolve_repo_paths() {
+    local -a result=()
+    local arg path
+    for arg in "$@"; do
+        if [ -d "$arg" ]; then
+            result+=("$arg")
+        else
+            path="$(repo list -p "$arg" 2>/dev/null | head -1)" || true
+            if [ -n "$path" ] && [ -d "$path" ]; then
+                result+=("$path")
+            else
+                err "unknown project or path: $arg"
+                return 1
+            fi
+        fi
+    done
+    printf '%s\n' "${result[@]}"
+}
+
 repo_sync_progress_count() {
     local log_path="$1"
     local ratio_done=0
@@ -1161,8 +1183,6 @@ fix_lfs_storage() {
 
     if [ "$fixed" -gt 0 ]; then
         info "Fixed lfs.storage in ${fixed}/${total} project configs (stripped trailing /objects for git-lfs 3.0.2 compat)."
-    else
-        warn "fix_lfs_storage: no configs with buggy /lfs/objects pattern found (checked ${total} repos)."
     fi
 }
 
@@ -1559,6 +1579,15 @@ sync_stage_repo() {
         fi
 
         if [ "$SYNC_FORCE_ENABLED" != "true" ]; then
+            mapfile -t _hint_paths < <(collect_repo_sync_failures "$LAST_STEP_LOG")
+            if [ ${#_hint_paths[@]} -gt 0 ]; then
+                err "To retry specific projects:"
+                for _hp in "${_hint_paths[@]}"; do
+                    err "  ohos sync $_hp"
+                done
+            else
+                err "To retry: ohos sync <project>"
+            fi
             return "$rc"
         fi
 
@@ -1702,6 +1731,7 @@ cmd_sync() {
     local run_lfs=true
     local run_prebuilts=true
     local sync_download_sdk=false
+    local -a sync_projects=()
 
     SYNC_FORCE_ENABLED=false
     SYNC_RAW_OUTPUT=false
@@ -1717,13 +1747,46 @@ cmd_sync() {
                 run_lfs=false
                 run_prebuilts=false
                 ;;
-            *)
+            -*)
                 err "sync: unknown option $1"
                 exit 1
+                ;;
+            *)
+                sync_projects+=("$1")
                 ;;
         esac
         shift
     done
+
+    # Single/multi-project sync: repo sync only those projects
+    if [ ${#sync_projects[@]} -gt 0 ]; then
+        local -a resolved_paths
+        mapfile -t resolved_paths < <(resolve_repo_paths "${sync_projects[@]}") || return 1
+        info "repo sync for ${#resolved_paths[@]} project(s): ${resolved_paths[*]}"
+        repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch --retry-fetches=5 "${resolved_paths[@]}"
+        local sync_rc=$?
+        if [ "$sync_rc" -ne 0 ]; then
+            err "repo sync failed for: ${resolved_paths[*]}"
+            return "$sync_rc"
+        fi
+        local _lfs_env='env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs'
+        for _sp in "${resolved_paths[@]}"; do
+            if [ -d "$_sp" ]; then
+                info "LFS checkout: $_sp"
+                local _lfs_rc=0
+                (cd "$_sp" && eval "${_lfs_env}" git lfs checkout 2>&1) || _lfs_rc=$?
+                if [ "$_lfs_rc" -ne 0 ]; then
+                    warn "LFS checkout failed for $_sp (exit $_lfs_rc), retrying..."
+                    (cd "$_sp" && eval "${_lfs_env}" git lfs fetch --all 2>&1 && eval "${_lfs_env}" git lfs checkout 2>&1) || {
+                        err "LFS checkout still failing for $_sp after retry"
+                        return 1
+                    }
+                fi
+            fi
+        done
+        info "Sync complete."
+        return 0
+    fi
 
     ensure_sync_prereqs "$run_prebuilts"
 
@@ -1750,18 +1813,65 @@ cmd_sync() {
 cmd_reset() {
     require_ohos_repo
     local skip_sync=false
+    local -a reset_projects=()
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-sync) skip_sync=true ;;
-            *)
+            -*)
                 err "reset: unknown option $1"
                 exit 1
+                ;;
+            *)
+                reset_projects+=("$1")
                 ;;
         esac
         shift
     done
 
+    # Single-project reset mode
+    if [ ${#reset_projects[@]} -eq 1 ]; then
+        local -a resolved_paths
+        mapfile -t resolved_paths < <(resolve_repo_paths "${reset_projects[0]}") || exit 1
+        local project="${resolved_paths[0]}"
+
+        info "Resetting single project: $project"
+        info "  [1/3] removing $project"
+        rm -rf "$project"
+
+        info "  [2/3] repo sync $project"
+        repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch "$project"
+        local sync_rc=$?
+        if [ "$sync_rc" -ne 0 ]; then
+            err "repo sync failed for $project (exit $sync_rc)"
+            err "  retry with: ohos sync $project"
+            exit "$sync_rc"
+        fi
+
+        if [ -d "$project" ]; then
+            info "  [3/3] LFS checkout $project"
+            local _lfs_env='env -u LocalMediaDir -u LocalReferenceDirs -u TempDir -u LfsStorageDir GIT_LFS_STORAGE=.git/lfs'
+            local _lfs_rc=0
+            (cd "$project" && eval "${_lfs_env}" git lfs checkout 2>&1) || _lfs_rc=$?
+            if [ "$_lfs_rc" -ne 0 ]; then
+                warn "LFS checkout failed for $project (exit $_lfs_rc), retrying..."
+                (cd "$project" && eval "${_lfs_env}" git lfs fetch --all 2>&1 && eval "${_lfs_env}" git lfs checkout 2>&1) || {
+                    err "LFS checkout still failing for $project after retry"
+                    exit 1
+                }
+            fi
+        fi
+
+        info "Reset complete: $project"
+        return 0
+    fi
+
+    if [ ${#reset_projects[@]} -gt 1 ]; then
+        err "reset: only one project at a time is supported (got ${#reset_projects[@]}: ${reset_projects[*]})"
+        exit 1
+    fi
+
+    # Full reset (no project specified)
     warn "This will hard-reset ALL sub-repos and delete: ${RESET_RM_DIRS}"
     if [ "$RESET_LFS_PRUNE" = "true" ]; then
         warn "  + git lfs prune (slow)"
@@ -3683,8 +3793,8 @@ Usage:
 
 Chainable commands:
   init [options]           Initialize a repo in the current directory
-  sync [options]           repo sync + git lfs fetch/checkout + prebuilts download
-  reset [options]          Hard-reset all sub-repos, remove artifacts, optionally sync
+  sync [options] [project..] repo sync + git lfs fetch/checkout + prebuilts download
+  reset [options] [project] Hard-reset sub-repos; single project if name given
   gc [options]             Maintenance: lfs prune + git gc
   build [target] [args]    Build a target; chained build should be the final command
   fr [target] [args]       Quick rebuild with ./build.sh --fast-rebuild
@@ -4253,9 +4363,17 @@ HELP
 
 print_help_reset() {
     cat <<HELP
-reset - hard-reset all sub-repos, clean artifacts, and optionally re-sync
+reset - hard-reset sub-repos, clean artifacts, and optionally re-sync
 
-What it runs (in order):
+Usage:
+  ohos reset [options]          Reset ALL sub-repos (with confirmation)
+  ohos reset <project>         Reset a single project (delete + re-sync)
+
+Single-project mode:
+  Deletes the project directory and re-syncs it via repo sync.
+  No confirmation prompt. Also runs LFS checkout.
+
+Full reset runs (in order):
   [1] repo forall -j $RESET_JOBS -c 'git clean -fxd'
        Remove all untracked and ignored files in every sub-repo.
   [2] repo forall -j $RESET_JOBS -c 'git reset --hard HEAD'
@@ -4277,9 +4395,10 @@ Configuration (from ${OHOS_CONF}):
   RESET_RM_DIRS="$RESET_RM_DIRS"
 
 Options:
-  --no-sync     skip the final 'ohos sync' step
+  --no-sync     skip the final 'ohos sync' step (full reset only)
 
 Examples:
+  ohos reset arkui_ace_engine
   ohos reset
   ohos reset --no-sync
 HELP
@@ -4486,8 +4605,8 @@ while [ $# -gt 0 ]; do
                         shift
                         ;;
                     *)
-                        err "sync: unknown option $1"
-                        exit 1
+                        sync_args+=("$1")
+                        shift
                         ;;
                 esac
             done
@@ -4502,8 +4621,8 @@ while [ $# -gt 0 ]; do
                         shift
                         ;;
                     *)
-                        err "reset: unknown option $1"
-                        exit 1
+                        reset_args+=("$1")
+                        shift
                         ;;
                 esac
             done
