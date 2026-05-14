@@ -1007,7 +1007,7 @@ resolve_repo_paths() {
             result+=("$arg")
         else
             path="$(repo list -p "$arg" 2>/dev/null | head -1)" || true
-            if [ -n "$path" ] && [ -d "$path" ]; then
+            if [ -n "$path" ]; then
                 result+=("$path")
             else
                 err "unknown project or path: $arg"
