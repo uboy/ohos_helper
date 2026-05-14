@@ -1018,6 +1018,17 @@ resolve_repo_paths() {
     printf '%s\n' "${result[@]}"
 }
 
+# Remove stale .lock files left by crashed git processes.
+# Without this, repo sync fails with "Unable to create shallow.lock: File exists".
+clean_stale_git_locks() {
+    local lock_count
+    lock_count="$(find .repo/projects -name '*.lock' -type f 2>/dev/null | wc -l)"
+    if [ "$lock_count" -gt 0 ]; then
+        warn "Removing ${lock_count} stale git lock file(s) from .repo/projects/"
+        find .repo/projects -name '*.lock' -type f -delete 2>/dev/null
+    fi
+}
+
 repo_sync_progress_count() {
     local log_path="$1"
     local ratio_done=0
@@ -1533,6 +1544,7 @@ sync_stage_repo() {
     local -a parsed_paths=()
 
     fix_lfs_storage
+    clean_stale_git_locks
 
     while true; do
         LAST_STEP_LOG="$(mktemp /tmp/ohos_repo_sync_XXXXXX.log)"
@@ -1773,6 +1785,7 @@ cmd_sync() {
         [ -n "$resolved_paths_str" ] || { err "no paths resolved"; return 1; }
         mapfile -t resolved_paths <<< "$resolved_paths_str"
         info "repo sync for ${#resolved_paths[@]} project(s): ${resolved_paths[*]}"
+        clean_stale_git_locks
         repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch --retry-fetches=5 "${resolved_paths[@]}"
         local sync_rc=$?
         if [ "$sync_rc" -ne 0 ]; then
@@ -1852,6 +1865,7 @@ cmd_reset() {
         rm -rf "$project"
 
         info "  [2/3] repo sync $project"
+        clean_stale_git_locks
         repo sync -j "$REPO_SYNC_JOBS" --optimized-fetch --current-branch "$project"
         local sync_rc=$?
         if [ "$sync_rc" -ne 0 ]; then
