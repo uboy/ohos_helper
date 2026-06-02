@@ -1,0 +1,178 @@
+#!/bin/bash
+# xts-test-hap.sh.template — install, run, and collect XTS test result for one HAP
+#
+# Designed for NFS-first execution: script runs on remote server, all output
+# goes to NFS files. No stdout capture needed — result written to RESULT_FILE.
+#
+# Placeholders: HDC_PATH, SERIAL, HAP_PATH, BUNDLE, MODULE, DEVICE_TMP,
+#               TEST_WINDOW, INSTALL_METHOD, LOG_DIR, RESULT_FILE
+#
+# Result codes: PASS, PARTIAL, INSTALL_FAIL, CRASH, TIMEOUT, NOT_INSTALLED,
+#               EXEC_FAIL, UNKNOWN
+set -euo pipefail
+
+# Placeholder variables
+LOG_DIR="{{LOG_DIR}}"
+RESULT_FILE="{{RESULT_FILE}}"
+HDC="{{HDC_PATH}}"
+SERIAL="{{SERIAL}}"
+HAP_PATH="{{HAP_PATH}}"
+BUNDLE="{{BUNDLE}}"
+MODULE="{{MODULE}}"
+DEVICE_TMP="{{DEVICE_TMP}}"
+TEST_WINDOW="{{TEST_WINDOW}}"
+INSTALL_METHOD="{{INSTALL_METHOD}}"
+LOG_BASE="$(basename "$HAP_PATH" .hap)"
+
+# Create log directory and result file's parent
+mkdir -p "$LOG_DIR"
+
+# All output (echo, hdc stderr, etc) goes to log file.
+# stdout/stderr both appended to log. Result written to separate file.
+LOG_FILE="$LOG_DIR/$LOG_BASE.full.log"
+exec >> "$LOG_FILE" 2>&1
+
+# --- Helper to write result and exit ---
+finish() {
+    local code="${1:-UNKNOWN}"
+    local msg="${2:-no message}"
+    echo "[$(ts)] Test finished with result: $code" >> "$LOG_FILE"
+    echo "[$(ts)] Message: $msg" >> "$LOG_FILE"
+    echo -e "${code}\t${msg}" > "$RESULT_FILE"
+    exit 0
+}
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+hdc() { "$HDC" -t "$SERIAL" "$@"; }
+
+HILOG_DIR="$LOG_DIR/hilog_$SERIAL"
+
+echo "[$(ts)] ========================================"
+echo "[$(ts)] Starting HAP test: $HAP_PATH"
+echo "[$(ts)] Device: $SERIAL"
+echo "[$(ts)] Bundle: $BUNDLE Module: $MODULE"
+
+# Wake screen
+echo "[$(ts)] Waking screen..."
+hdc shell "power-shell wakeup" >/dev/null 2>&1 || true
+
+# Clear hilog buffer BEFORE test
+echo "[$(ts)] Clearing hilog buffer..."
+hdc shell "hilog -r" >/dev/null 2>&1 || true
+
+# Uninstall previous version
+echo "[$(ts)] Uninstalling previous version..."
+hdc uninstall "$BUNDLE" >/dev/null 2>&1 || true
+
+# Install
+case "$INSTALL_METHOD" in
+    two-phase)
+        echo "[$(ts)] Sending HAP to device: $DEVICE_TMP"
+        hdc file send "$HAP_PATH" "$DEVICE_TMP" || {
+            echo "[$(ts)] File send FAILED"
+            finish "INSTALL_FAIL" "file_send_failed"
+        }
+        echo "[$(ts)] Installing from device path..."
+        INSTALL_OUT="$(hdc shell "bm install -p \"$DEVICE_TMP\"" 2>&1)" || INSTALL_OUT="install_failed"
+        echo "[$(ts)] Cleaning up device temp..."
+        hdc shell "rm -f $DEVICE_TMP" >/dev/null 2>&1 || true
+        ;;
+    direct|*)
+        echo "[$(ts)] Installing directly..."
+        INSTALL_OUT="$(hdc install "$HAP_PATH" 2>&1)" || INSTALL_OUT="install_failed"
+        hdc shell "rm -f $DEVICE_TMP" >/dev/null 2>&1 || true
+        ;;
+esac
+
+echo "[$(ts)] Install output: $INSTALL_OUT"
+
+if ! echo "$INSTALL_OUT" | grep -q "install bundle successfully"; then
+    finish "INSTALL_FAIL" "$(echo "$INSTALL_OUT" | head -1 | tr '\t' ' ')"
+fi
+
+# Run test
+echo "[$(ts)] Starting test execution (timeout: ${TEST_WINDOW}s)..."
+TEST_OUT="$(hdc shell "aa test -b $BUNDLE -m $MODULE -s unittest OHJSUnitTest -w $TEST_WINDOW" 2>&1)" || TEST_OUT="test_exec_failed"
+echo "[$(ts)] Test execution completed"
+echo "[$(ts)] Raw test output:"
+echo "$TEST_OUT"
+echo "[$(ts)] End of raw test output"
+
+# --- Capture device logs for failures ---
+#
+# hilog was cleared before the test. Now dump the buffer.
+# "hilog" = read buffer. "hilog -r" = clear (DO NOT use here).
+# No head/pipe limits needed — script runs directly on remote,
+# not through $() capture, so large output won't block.
+
+capture_full_logs() {
+    echo "[$(ts)] Capturing full device logs..."
+    mkdir -p "$HILOG_DIR" || true
+
+    # Small delay to ensure logs are flushed to buffer
+    sleep 1 || true
+
+    # Full hilog dump — timeout prevents hanging on large/continuous buffers.
+    # Use $HDC directly (timeout can't call shell functions).
+    timeout 30 "$HDC" -t "$SERIAL" shell "hilog" > "$HILOG_DIR/hilog_full.txt" 2>/dev/null || true
+
+    # Extract arkts.console separately
+    grep -a "arkts\.console" "$HILOG_DIR/hilog_full.txt" > "$HILOG_DIR/arkts_console.txt" 2>/dev/null || true
+
+    # Device info — timeout prevents hanging
+    echo "[$(ts)] Capturing device info..."
+    timeout 10 "$HDC" -t "$SERIAL" shell "bm list -a" > "$HILOG_DIR/device_info.txt" 2>/dev/null || true
+    timeout 10 "$HDC" -t "$SERIAL" shell "getprop | grep ro.build" >> "$HILOG_DIR/device_info.txt" 2>/dev/null || true
+
+    local hlines
+    hlines="$(wc -l < "$HILOG_DIR/hilog_full.txt" 2>/dev/null)" || hlines="0"
+    echo "[$(ts)] Log capture completed. hilog lines: $hlines"
+}
+
+# --- Parse result ---
+RESULT_CODE=""
+RESULT_MSG=""
+
+REPORT_LINE="$(echo "$TEST_OUT" | grep "OHOS_REPORT_RESULT" | tail -n 1)" || true
+
+if [ -n "$REPORT_LINE" ]; then
+    PASS_N="$(echo "$REPORT_LINE" | sed -n 's/.*Pass:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)" || true
+    FAIL_N="$(echo "$REPORT_LINE" | sed -n 's/.*Failure:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)" || true
+    ERR_N="$(echo "$REPORT_LINE" | sed -n 's/.*Error:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)" || true
+    PASS_N="${PASS_N:-0}"
+    FAIL_N="${FAIL_N:-0}"
+    ERR_N="${ERR_N:-0}"
+    TOTAL_FAIL=$((FAIL_N + ERR_N))
+    if [ "$TOTAL_FAIL" = "0" ] && [ "$PASS_N" -gt 0 ]; then
+        RESULT_CODE="PASS"
+        RESULT_MSG="pass=$PASS_N fail=$FAIL_N error=$ERR_N"
+    else
+        RESULT_CODE="PARTIAL"
+        RESULT_MSG="pass=$PASS_N fail=$FAIL_N error=$ERR_N"
+        capture_full_logs
+    fi
+elif echo "$TEST_OUT" | grep -q "App died"; then
+    RESULT_CODE="CRASH"
+    RESULT_MSG="App died"
+    capture_full_logs
+elif echo "$TEST_OUT" | grep -q "Timeout"; then
+    LAST_STATUS="$(echo "$TEST_OUT" | grep "OHOS_REPORT_STATUS: current=" | tail -n 1)" || true
+    CURR="$(echo "$LAST_STATUS" | sed -n 's/.*current=\([0-9]*\).*/\1/p' | head -1)" || echo "?"
+    NUM="$(echo "$LAST_STATUS" | sed -n 's/.*numtests=\([0-9]*\).*/\1/p' | head -1)" || echo "?"
+    RESULT_CODE="TIMEOUT"
+    RESULT_MSG="Timeout ($CURR/$NUM completed)"
+    capture_full_logs
+elif echo "$TEST_OUT" | grep -q "not installed"; then
+    RESULT_CODE="NOT_INSTALLED"
+    RESULT_MSG="Bundle not found"
+elif echo "$TEST_OUT" | grep -q "failed to execute"; then
+    RESULT_CODE="EXEC_FAIL"
+    RESULT_MSG="Failed to execute"
+    capture_full_logs
+else
+    RESULT_CODE="UNKNOWN"
+    RESULT_MSG="$(echo "$TEST_OUT" | head -1 | cut -c1-80)"
+    capture_full_logs
+fi
+
+finish "$RESULT_CODE" "$RESULT_MSG"

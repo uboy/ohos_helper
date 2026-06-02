@@ -1,0 +1,7 @@
+[submodule "arkui-xts-selector"]
+	path = arkui-xts-selector
+	url = https://github.com/uboy/xts-selector.git
+	ignore = dirty
+[submodule "gitee_util"]
+	path = gitee_util
+	url = https://github.com/uboy/gitee_util.git

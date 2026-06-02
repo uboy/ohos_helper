@@ -1,0 +1,38 @@
+{
+    "boards": [
+        {"n": 1, "serial": "150100424a5444345203698640000101", "short": "000101",
+         "server": "10.0.0.1", "locationid_loader": "101", "locationid_maskrom": "201",
+         "loader_serial": "1160102310000101", "status": "OK", "label": "server1-#1"},
+        {"n": 2, "serial": "150100424a5444345203698640000102", "short": "000102",
+         "server": "10.0.0.1", "locationid_loader": "102", "locationid_maskrom": "202",
+         "loader_serial": "1160102310000102", "status": "OK", "label": "server1-#2"},
+        {"n": 3, "serial": "150100424a5444345203698640000103", "short": "000103",
+         "server": "10.0.0.2", "locationid_loader": "103", "locationid_maskrom": "203",
+         "loader_serial": "1160102310000103", "status": "OK", "label": "server2-#1"},
+        {"n": 4, "serial": "150100424a5444345203698640000104", "short": "000104",
+         "server": "10.0.0.2", "locationid_loader": "104", "locationid_maskrom": "204",
+         "loader_serial": "1160102310000104", "status": "OK", "label": "server2-#2"}
+    ],
+    "servers": {
+        "server1": "10.0.0.1",
+        "server2": "10.0.0.2",
+        "server3": "10.0.0.3"
+    },
+    "pdu": {
+        "host": "10.0.0.100",
+        "user": "apc"
+    },
+    "ssh": {
+        "user": "testuser",
+        "bridge_host": "bridge-server"
+    },
+    "paths": {
+        "tools_dir": "/opt/ohos/tools",
+        "hdc": "/opt/ohos/tools/hdc",
+        "flash_py": "/opt/ohos/tools/linux/flash.py",
+        "firmware": "/opt/ohos/artifacts/test-build/firmware",
+        "xts_tests": "/opt/ohos/xts_tests",
+        "sdk": "/opt/ohos/sdk",
+        "firmwares": "/opt/ohos/firmwares"
+    }
+}

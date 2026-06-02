@@ -1,0 +1,104 @@
+# =============================================================================
+# ohos.conf.example — template for local ohos.conf
+#
+# Copy this file to ohos.conf and adjust for your environment.
+# ohos.conf is gitignored and must be created locally.
+# =============================================================================
+
+# ---- Mirror URLs (public defaults; override with internal mirrors) -----------
+# NPM_REGISTRY="https://repo.huaweicloud.com/repository/npm/"
+# OHOS_NPM_REGISTRY="https://repo.harmonyos.com/npm/"
+# OHPM_REGISTRY="https://repo.harmonyos.com/ohpm/"
+# PYPI_URL="http://repo.huaweicloud.com/repository/pypi/simple"
+# TRUSTED_HOST=""
+
+# ---- @koalaui / @azanat / @arkoala / @panda / @idlizer scope -----------------
+# KOALA_NPM_REGISTRY=""
+
+# ---- Optional public/default registry profile --------------------------------
+# Used by: `ohos npmrc original`
+ORIGINAL_NPM_REGISTRY="https://repo.huaweicloud.com/repository/npm/"
+ORIGINAL_OHOS_NPM_REGISTRY="https://repo.harmonyos.com/npm/"
+ORIGINAL_OHPM_REGISTRY="https://repo.harmonyos.com/ohpm/"
+OHPM_PUBLISH_REGISTRY="https://ohpm.openharmony.cn/ohpm/"
+ORIGINAL_KOALA_NPM_REGISTRY=""
+
+# Which npmrc profile sync/build should use when swapping ~/.npmrc.
+# Supported values: mirror, original
+OHOS_SYNC_NPMRC_PROFILE="mirror"
+
+# ---- Repo source -------------------------------------------------------------
+REPO_MANIFEST_URL="https://gitcode.com/openharmony/manifest.git"
+REPO_INSTALL_URL="https://gitee.com/oschina/repo/raw/fork_flow/repo-py3"
+
+# ---- Shared paths (set per-machine) ------------------------------------------
+# REPO_REFERENCE=""
+# LFS_MIRROR=""
+# SHARED_PREBUILTS_DIR=""
+PREBUILTS_SYMLINK_NAME="openharmony_prebuilts"
+
+# ---- HTTP proxy (optional) ---------------------------------------------------
+# Leave empty to disable proxy fallback.
+# OHOS_PROXY=""
+# OHOS_PROXY_CONNECT_TIMEOUT=15
+# OHOS_NO_PROXY="localhost,127.0.0.1"
+
+# ---- Parallelism -------------------------------------------------------------
+REPO_SYNC_JOBS=64
+LFS_JOBS=64
+RESET_JOBS=64
+
+# ---- Build aliases -----------------------------------------------------------
+BUILD_SDK="--product-name ohos-sdk --ccache"
+BUILD_SDK_LINUX="--product-name ohos-sdk --gn-args sdk_platform=linux --ccache"
+BUILD_SDK_WIN="--product-name ohos-sdk --gn-args sdk_platform=win --ccache"
+BUILD_RK3568="--product-name rk3568 --ccache"
+
+# ---- ccache -----------------------------------------------------------------
+# CCACHE_DIR=""
+# CCACHE_MAXSIZE="200G"
+
+# ---- Sync command ------------------------------------------------------------
+SYNC_CMD="repo sync -j {REPO_SYNC_JOBS} --optimized-fetch --current-branch --retry-fetches=5"
+LFS_CMD="repo forall -j {LFS_JOBS} -c 'git config lfs.storage {LFS_MIRROR}/\$REPO_PROJECT.git/lfs/objects && git lfs fetch && git lfs checkout'"
+
+# ---- Reset command -----------------------------------------------------------
+RESET_LFS_PRUNE=false
+RESET_GC=false
+RESET_RM_DIRS="out prebuilts"
+
+# ---- GC / maintenance --------------------------------------------------------
+GC_LFS_PRUNE=true
+GC_GIT_GC=true
+GC_JOBS=32
+
+# ---- Download roots (set per-machine) ----------------------------------------
+# SDK_DOWNLOAD_ROOT=""
+# FIRMWARE_DOWNLOAD_ROOT=""
+
+# ---- Shared flashing tools (set per-machine) ---------------------------------
+# FLASH_PY_PATH=""
+# HDC_PATH=""
+# HDC_LIBRARY_PATH=""
+
+# ---- CI tools (set per-machine) ----------------------------------------------
+# OHOS_TOOLS_DIR=""                           # shared tools root (hdc, flash, etc.)
+# OHOS_HVIGOR_CI_URL=""                       # git repo with CI hvigor fork
+# OHOS_HVIGOR_CI_BRANCH=""                    # branch to clone
+
+# ---- Remote HDC endpoint (optional) ------------------------------------------
+# XTS_HDC_ENDPOINT=""
+
+# ---- Windows bridge output ---------------------------------------------------
+XTS_WINDOWS_BRIDGE_OUTPUT_ROOT="$HOME/ohos-xts-bridge"
+
+# ---- OHOS repo root (optional override) --------------------------------------
+# OHOS_REPO_ROOT=""
+
+# ---- Init command ------------------------------------------------------------
+INIT_BRANCH="master"
+INIT_EXTRA_ARGS="--no-repo-verify"
+
+# ---- Shared environment ------------------------------------------------------
+OHOS_SHARED_UMASK="000"
+# OHOS_SHARED_GROUP=""

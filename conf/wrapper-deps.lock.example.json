@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "strategy": "nested_git_repos_with_lockfile",
+  "generated_for": "<REPO_ROOT>",
+  "dependencies": {
+    "gitee_util": {
+      "path": "gitee_util",
+      "upstream_fetch_url": "https://github.com/uboy/gitee_util.git",
+      "branch": "master",
+      "locked_head": "a481b719e4d4ee253ff8ae7fb58f8068cfe1dc10"
+    },
+    "arkui-xts-selector": {
+      "path": "arkui-xts-selector",
+      "upstream_fetch_url": "https://github.com/uboy/xts-selector.git",
+      "branch": "master",
+      "locked_head": "ba1772941b97454da9a7410d4dfd694e74fa611d"
+    }
+  }
+}

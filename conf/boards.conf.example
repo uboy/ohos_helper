@@ -1,0 +1,52 @@
+# =============================================================================
+# boards.conf.example — template for local boards.conf
+#
+# Copy this file to boards.conf and fill in real values.
+# boards.conf is gitignored and must be created locally.
+#
+# Sourced as shell script by ohos_device.sh.
+# Board entries define server, serial, short name, power outlet, and status.
+#
+# Path resolution:
+#   Default:  ${SCRIPT_DIR}/conf/boards.conf
+#   Override: BOARDS_CONF=/path/to/boards.conf (env var)
+#   Or:       OHOS_CONF_DIR=/path/to/conf/ (looks for boards.conf inside)
+#
+# Format per entry:
+#   BOARD_<N>_LABEL="<display label>"
+#   BOARD_<N>_SERVER="<hostname or IP>"
+#   BOARD_<N>_SERIAL="<full HDC serial>"
+#   BOARD_<N>_SHORT="<short serial suffix>"
+#   BOARD_<N>_OUTLET="<power outlet number or label>"
+#   BOARD_<N>_STATUS="<OK|BROKEN|OFFLINE>"
+#   BOARD_<N>_LOCATIONID_MASKROM="<LocationID in Maskrom/HDC mode>"
+#   BOARD_<N>_LOCATIONID_LOADER="<LocationID in Loader mode>"
+#   BOARD_<N>_LOADER_SERIAL="<SerialNo in Loader mode>"
+# =============================================================================
+
+# ---- PDU configuration --------------------------------------------------------
+# APC AP8959 Rack PDU for power cycling boards
+PDU_HOST="10.0.0.1"
+PDU_USER="apc"
+PDU_PASS="apc"
+PDU_PROTO="telnet"  # ssh or telnet
+
+# ---- Board entries (numbered 1-based) ----------------------------------------
+
+# Example board entry:
+# BOARD_1_LABEL="BM1-board1"
+# BOARD_1_SERVER="10.0.0.101"
+# BOARD_1_SERIAL="<full HDC serial from 'hdc list targets'>"
+# BOARD_1_SHORT="<last 6-12 chars of serial>"
+# BOARD_1_OUTLET="3"
+# BOARD_1_STATUS="OK"
+# BOARD_1_LOCATIONID_MASKROM="<from 'flash.x86_64 LD' in Maskrom mode>"
+# BOARD_1_LOCATIONID_LOADER="<from 'flash.x86_64 LD' in Loader mode>"
+# BOARD_1_LOADER_SERIAL="<from 'flash.x86_64 LD' in Loader mode>"
+
+# ---- SSH user for remote servers ----------------------------------------------
+OHOS_SSH_USER="${OHOS_SSH_USER:-${USER}}"
+
+# ---- Auto-derived (do not edit) -----------------------------------------------
+# BOARD_SERVERS="10.0.0.101,10.0.0.102"  # auto-derived from entries above
+# BOARD_COUNT=1

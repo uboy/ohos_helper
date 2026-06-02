@@ -1,0 +1,31 @@
+# build-workarounds.yaml — PR/patches needed per build target
+#
+# Copy to conf/build-workarounds.yaml and fill in real PR numbers.
+# conf/build-workarounds.yaml is gitignored.
+#
+# Structure:
+#   <target>:
+#     - repo: <relative-path-in-manifest>   # e.g. interface/sdk-js
+#       pr: <number>                         # GitCode/Gitee merge request number
+#       remote: <git-url>                    # fetch URL for the PR ref
+#       description: "<why this is needed>"
+#       optional: true|false                 # true = warn on failure, don't abort
+#
+# Commands:
+#   ohos build-workarounds list              # Show all targets and PRs
+#   ohos build-workarounds apply <target>    # Apply PRs for target
+#   ohos build-workarounds revert <target>   # git reset --hard in touched repos
+
+xts-static:
+  # Example entries — replace with actual PRs needed for xts-static build
+  # - repo: interface/sdk-js
+  #   pr: 00000
+  #   remote: https://gitcode.com/openharmony/interface_sdk-js.git
+  #   description: "Description of what this PR fixes"
+  []
+
+rksdk:
+  []
+
+xts-dynamic:
+  []

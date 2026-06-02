@@ -1,0 +1,29 @@
+#!/bin/bash
+# init-board.sh.template — prepare board for testing
+# Placeholders: HDC_PATH, SERIAL, TIMEOUT_MS, MODE (init|restore)
+set -euo pipefail
+
+HDC="{{HDC_PATH}}"
+SERIAL="{{SERIAL}}"
+TIMEOUT_MS="{{TIMEOUT_MS}}"
+MODE="{{MODE}}"
+
+hdc() { "$HDC" -t "$SERIAL" "$@"; }
+
+if [ "$MODE" = "restore" ]; then
+    hdc shell "power-shell timeout -r" >/dev/null 2>&1 || true
+    hdc shell "power-shell setmode 600" >/dev/null 2>&1 || true
+    echo "RESTORED"
+else
+    hdc shell "power-shell wakeup" >/dev/null 2>&1 || true
+    sleep 0.5
+    hdc shell "power-shell timeout -o $TIMEOUT_MS" >/dev/null 2>&1 || echo "WARN:timeout_failed"
+    hdc shell "power-shell setmode 602" >/dev/null 2>&1 || echo "WARN:setmode_failed"
+    sleep 0.5
+    hdc shell "uitest uiInput dircFling 2" >/dev/null 2>&1 || true
+    sleep 0.3
+    hdc shell "uitest uiInput click 350 800" >/dev/null 2>&1 || true
+    sleep 0.3
+    hdc shell "aa force-stop com.usb.right" >/dev/null 2>&1 || true
+    echo "OK"
+fi
