@@ -182,14 +182,17 @@ run_xts_artifacts_tool() {
     fi
     local extra_args=()
 
-    if [ -n "${SDK_DOWNLOAD_ROOT:-}" ]; then
-        extra_args+=(--sdk-cache-root "$SDK_DOWNLOAD_ROOT")
-    fi
-    if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
-        extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
-    fi
-    if [ -n "${XTS_DOWNLOAD_ROOT:-}" ]; then
-        extra_args+=(--daily-cache-root "$XTS_DOWNLOAD_ROOT")
+    # list-components doesn't accept cache-root args
+    if [ "${1:-}" != "list-components" ]; then
+        if [ -n "${SDK_DOWNLOAD_ROOT:-}" ]; then
+            extra_args+=(--sdk-cache-root "$SDK_DOWNLOAD_ROOT")
+        fi
+        if [ -n "${FIRMWARE_DOWNLOAD_ROOT:-}" ]; then
+            extra_args+=(--firmware-cache-root "$FIRMWARE_DOWNLOAD_ROOT")
+        fi
+        if [ -n "${XTS_DOWNLOAD_ROOT:-}" ]; then
+            extra_args+=(--daily-cache-root "$XTS_DOWNLOAD_ROOT")
+        fi
     fi
 
     download_run_foreground env \
@@ -200,7 +203,7 @@ run_xts_artifacts_tool() {
 
 download_tag_flag_for_subcmd() {
     case "$1" in
-        tests) printf '%s\n' "--daily-build-tag" ;;
+        tests|xts-acts|host-tools) printf '%s\n' "--daily-build-tag" ;;
         sdk) printf '%s\n' "--sdk-build-tag" ;;
         firmware) printf '%s\n' "--firmware-build-tag" ;;
         *) return 1 ;;
@@ -210,9 +213,11 @@ download_tag_flag_for_subcmd() {
 download_tag_label_for_subcmd() {
     case "$1" in
         tests) printf '%s\n' "daily test suite" ;;
+        xts-acts) printf '%s\n' "XTS ACTS build" ;;
         sdk) printf '%s\n' "SDK" ;;
         firmware) printf '%s\n' "firmware" ;;
-        *) return 1 ;;
+        host-tools) printf '%s\n' "host tools" ;;
+        *) printf '%s\n' "$1" ;;
     esac
 }
 
@@ -376,7 +381,7 @@ download_collect_recent_tags() {
 }
 
 download_choose_artifact_type() {
-    local options=("tests" "sdk" "firmware")
+    local options=("tests" "xts-acts" "sdk" "firmware" "host-tools")
     download_menu_select "Select artifact type to download" options
 }
 
@@ -393,14 +398,16 @@ download_choose_tag() {
 
 print_help_download() {
     cat <<HELP
-download - download daily prebuilt SDK, firmware or XTS test packages
+download - download daily prebuilt CI artifacts
 
 Subcommands:
-  tests [tag]    Download daily XTS test suite (full package → extracts ACTS)
-  sdk   [tag]    Download daily SDK package
-  firmware [tag] Download daily firmware image package
-  list-tags [tests|sdk|firmware]
-                 List the most recent available build tags (default: tests)
+  tests [tag]       Download daily XTS test suite (full package → extracts ACTS)
+  xts-acts [tag]   Download daily XTS ACTS build
+  sdk   [tag]       Download daily SDK package
+  firmware [tag]    Download daily firmware image package
+  host-tools [tag]  Download daily host tools build
+  list-tags [type]  List the most recent available build tags (default: tests)
+  list-components   Show all available CI components for a given date
 
 Download roots (configured in ${OHOS_CONF} and ${OHOS_USER_CONF}):
   Shared   → $OHOS_SHARED_DOWNLOAD_ROOT
@@ -409,43 +416,49 @@ Download roots (configured in ${OHOS_CONF} and ${OHOS_USER_CONF}):
   XTS      → $XTS_DOWNLOAD_ROOT
 
 Behavior:
-  - In an interactive terminal, plain 'ohos download' opens an arrow-key menu for tests / sdk / firmware.
-  - In an interactive terminal, 'ohos download tests|sdk|firmware' without a tag opens an arrow-key menu with recent tags.
+  - In an interactive terminal, plain 'ohos download' opens an arrow-key menu.
+  - In an interactive terminal, 'ohos download <type>' without a tag opens an arrow-key menu with recent tags.
   - Press Enter to start the selected download, or Esc to cancel the menu.
-  - 'ohos download tests' / 'ohos download sdk' / 'ohos download firmware' without a tag lists recent tags and prints the next command to run.
   - A plain positional tag is accepted, e.g. 'ohos download firmware 20260404_120244'.
   - Interrupted downloads are resumed automatically (HTTP Range).
   - Archive filenames include the build tag for easy identification.
   - If a cached archive or extracted package is already present, the tool prints that it was found and skips re-downloading.
-  - Already-downloaded archives are not re-fetched unless the .part file exists.
   - Set OHOS_DOWNLOAD_MENU_FORCE=1 to force the menu in tests or other non-TTY environments.
 
-Options for tests/sdk/firmware:
-  --daily-build-tag TAG     (or --sdk-build-tag / --firmware-build-tag)
+Options:
+  --daily-build-tag TAG     Tag for tests/xts-acts/host-tools
+  --sdk-build-tag TAG       Tag for SDK
+  --firmware-build-tag TAG  Tag for firmware
+  --component NAME          Override DCP component name
   --daily-branch BRANCH     default: master
   --json                    print machine-readable JSON to stdout
 
 Options for list-tags:
-  --list-tags-count N       how many tags to show (default: 10)
+  --list-tags-count N       how many tags to show (default: 15)
   --list-tags-after DATE    only show tags on/after DATE (YYYYMMDD)
   --list-tags-before DATE   only show tags on/before DATE (YYYYMMDD)
   --list-tags-lookback N    days back to search (default: 30)
 
+Options for list-components:
+  --date DATE               Date to query (YYYYMMDD, default: today)
+  --branch BRANCH           Branch to query (default: master)
+
 Examples:
+  ohos download list-components
   ohos download list-tags
   ohos download list-tags sdk
-  ohos download list-tags firmware --list-tags-count 20
-  ohos download list-tags tests --list-tags-after 20260401
+  ohos download list-tags xts-acts --list-tags-count 20
   ohos download tests 20260404_120510
   ohos download sdk 20260404_120537
   ohos download firmware 20260404_120244
-  ohos download firmware --firmware-build-tag 20260404_120244
+  ohos download xts-acts 20260404_120510
+  ohos download host-tools --daily-build-tag 20260404_120510
 HELP
 }
 
 cmd_download() {
     local subcmd="${1:-}"
-    local tests_tag_flag="--daily-build-tag"
+    local daily_tag_flag="--daily-build-tag"
     local sdk_tag_flag="--sdk-build-tag"
     local firmware_tag_flag="--firmware-build-tag"
     if [ $# -gt 0 ]; then
@@ -475,14 +488,14 @@ cmd_download() {
             ;;
         tests)
             local tests_args=("$@")
-            if [ ${#tests_args[@]} -gt 0 ] && [[ "${tests_args[0]}" != -* ]] && ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
-                tests_args=("$tests_tag_flag" "${tests_args[0]}" "${tests_args[@]:1}")
+            if [ ${#tests_args[@]} -gt 0 ] && [[ "${tests_args[0]}" != -* ]] && ! download_has_tag_arg "$daily_tag_flag" "${tests_args[@]}"; then
+                tests_args=("$daily_tag_flag" "${tests_args[0]}" "${tests_args[@]:1}")
             fi
-            if ! download_has_tag_arg "$tests_tag_flag" "${tests_args[@]}"; then
+            if ! download_has_tag_arg "$daily_tag_flag" "${tests_args[@]}"; then
                 if download_menu_enabled; then
                     if download_choose_tag tests "${tests_args[@]}"; then
                         download_strip_list_args "${tests_args[@]}"
-                        tests_args=("$tests_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
+                        tests_args=("$daily_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
                     else
                         local menu_rc=$?
                         if [ "$menu_rc" -eq 130 ]; then
@@ -551,12 +564,43 @@ cmd_download() {
             fi
             run_xts_artifacts_tool download firmware "${firmware_args[@]}"
             ;;
+        # Generic types — all use --daily-build-tag
+        xts-acts|host-tools)
+            local generic_args=("$@")
+            if [ ${#generic_args[@]} -gt 0 ] && [[ "${generic_args[0]}" != -* ]] && ! download_has_tag_arg "$daily_tag_flag" "${generic_args[@]}"; then
+                generic_args=("$daily_tag_flag" "${generic_args[0]}" "${generic_args[@]:1}")
+            fi
+            if ! download_has_tag_arg "$daily_tag_flag" "${generic_args[@]}"; then
+                if download_menu_enabled; then
+                    if download_choose_tag "$subcmd" "${generic_args[@]}"; then
+                        download_strip_list_args "${generic_args[@]}"
+                        generic_args=("$daily_tag_flag" "$DOWNLOAD_MENU_RESULT" "${DOWNLOAD_MENU_FILTERED_ARGS[@]}")
+                    else
+                        local menu_rc=$?
+                        if [ "$menu_rc" -eq 130 ]; then
+                            info "Download cancelled."
+                            return 0
+                        fi
+                        return "$menu_rc"
+                    fi
+                else
+                    run_xts_artifacts_tool list-tags "$subcmd" "${generic_args[@]}"
+                    print_download_tag_hint "$subcmd"
+                    return 0
+                fi
+            fi
+            run_xts_artifacts_tool download "$subcmd" "${generic_args[@]}"
+            ;;
         list-tags)
             local list_type="${1:-tests}"
             if [ $# -gt 0 ]; then
                 shift
             fi
             run_xts_artifacts_tool list-tags "$list_type" "$@"
+            ;;
+        list-components)
+            shift 2>/dev/null || true
+            run_xts_artifacts_tool list-components "$@"
             ;;
         *)
             err "download: unknown subcommand: $subcmd"
