@@ -48,11 +48,7 @@ This repository contains the operator-facing OHOS helper scripts and two nested 
    - `repo_read`
    - `content_task`
    - `general`
-2. For non-trivial `repo_change` tasks:
-   - update `.scratchpad/research.md`
-   - update `.scratchpad/plan.md`
-   - update `coordination/tasks.jsonl`
-   - update `coordination/state/codex.md` after meaningful progress
+2. For non-trivial `repo_change` tasks, use `.agents/` for all temporary working files (plans, notes, coordination data). Delete when task is complete.
 3. Work on one backlog item at a time.
 4. Do not start the next backlog item until:
    - implementation is done
@@ -244,7 +240,7 @@ git merge pr_<PR_NUM> --no-edit
 | G3 | New commands integrated into `ohos_device.sh` dispatch (case statement at end of file) |
 | G4 | Help text (`print_help_*`) must document all options with examples |
 | G5 | Remote operations use `_ssh_run()` helper with `OHOS_SSH_USER` from boards.conf |
-| G6 | Test runs must save artifacts (logs, results, reports) to `test-artifacts/<timestamp>/` |
+| G6 | Test runs must save artifacts (logs, results, reports) to `$TEST_ARTIFACT_ROOT/<timestamp>/` (default: `$TMPDIR/ohos_test_artifacts/`) |
 | G7 | Artifacts include: stdout/stderr capture, test result XML/JSON, coverage summary |
 
 ## Requirement Change Policy
@@ -255,6 +251,19 @@ git merge pr_<PR_NUM> --no-edit
 2. If a new requirement is discovered during implementation, propose it to the user for approval before adding.
 3. Tests must verify requirements (behavior), not implementation details.
 4. When in doubt about whether a change affects requirements, ask the user.
+
+## Agent Temporary Files
+
+Agents produce temporary working files during tasks. Rules:
+
+1. **All agent temp files** go to `.agents/` (gitignored). This includes: plans, research notes, coordination data, review artifacts, scratch pads.
+2. **Delete temp files** when the task is complete. `.agents/` must be empty between tasks.
+3. **Persistent knowledge** — insights useful for future tasks must be saved as:
+   - Skills: `SKILL-*.md` for operational knowledge (how to flash, how to run XTS, etc.)
+   - `AGENTS.md` for project rules, requirements, and workflow
+   - `docs/` for reference documentation
+   - Never leave knowledge trapped in temp files.
+4. **No temp files in repo root.** Files like `CODE_REVIEW.md`, `TODO_*.md`, `*.scratch.md` in the root are forbidden — use `.agents/`.
 
 ## Runtime Artifacts
 

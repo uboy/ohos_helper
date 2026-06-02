@@ -7,7 +7,7 @@ Verifies board management requirements from AGENTS.md:
   G*  — General requirements
   R*  — XTS full run requirements (tested via ohos_xts_full_run.py imports)
 
-Test artifacts saved to: test-artifacts/<timestamp>/
+Test artifacts saved to: $TEST_ARTIFACT_ROOT/<timestamp>/ (default: $TMPDIR/ohos_test_artifacts)
 No real devices, flashing, or SSH connections required.
 """
 
@@ -35,7 +35,7 @@ PATHS = get_paths()
 SERVERS = get_servers()
 
 # Artifact directory per G6/G7
-ARTIFACT_ROOT = SCRIPT_DIR / "test-artifacts"
+ARTIFACT_ROOT = Path(os.environ.get("TEST_ARTIFACT_ROOT", os.path.join(os.environ.get("TMPDIR", "/tmp"), "ohos_test_artifacts")))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 ARTIFACT_DIR = ARTIFACT_ROOT / RUN_TIMESTAMP
 

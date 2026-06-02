@@ -6,7 +6,7 @@ Requirements verified:
   F11 — Smart flash recovery (skip hdc switch if already in Loader)
   F12 — Per-board flash locking
 
-Test artifacts saved to: test-artifacts/<timestamp>/
+Test artifacts saved to: $TEST_ARTIFACT_ROOT/<timestamp>/ (default: $TMPDIR/ohos_test_artifacts)
 """
 
 import json
@@ -23,7 +23,7 @@ from unittest import mock
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEVICE_SH = SCRIPT_DIR / "ohos_device.sh"
 
-ARTIFACT_ROOT = SCRIPT_DIR / "test-artifacts"
+ARTIFACT_ROOT = Path(os.environ.get("TEST_ARTIFACT_ROOT", os.path.join(os.environ.get("TMPDIR", "/tmp"), "ohos_test_artifacts")))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 ARTIFACT_DIR = ARTIFACT_ROOT / RUN_TIMESTAMP
 

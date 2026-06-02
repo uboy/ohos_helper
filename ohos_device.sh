@@ -1789,7 +1789,7 @@ Options:
   --conf-dir <dir>   Config directory (default: conf/)
   --shards <N>       Number of shards (default: one per device)
   --label <str>      Run label (default: full-run-YYYYMMDD-HHMMSS)
-  --output-dir <dir> Output directory (default: xts_full_runs/<label>)
+  --output-dir <dir> Output directory (default: $XTS_RUNS_DIR/<label> or $TMPDIR/ohos_xts_runs/<label>)
   --hdc <path>       Path to HDC binary
   --parallel <N>     Max parallel shards (default: one per shard)
   --timeout <secs>   Per-shard timeout (default: 7200)

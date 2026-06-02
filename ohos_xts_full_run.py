@@ -1105,7 +1105,7 @@ def main() -> int:
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Output directory (default: ./xts_full_runs/<label>)",
+        help="Output directory (default: $XTS_RUNS_DIR/<label> or $TMPDIR/ohos_xts_runs/<label>)",
     )
     parser.add_argument(
         "--hdc", default=None,
@@ -1171,7 +1171,8 @@ def main() -> int:
     num_shards = args.shards if args.shards > 0 else len(devices)
     parallel = args.parallel if args.parallel > 0 else num_shards
 
-    output_dir = Path(args.output_dir) if args.output_dir else script_dir / "xts_full_runs" / args.label
+    _default_runs_root = os.environ.get("XTS_RUNS_DIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "ohos_xts_runs"))
+    output_dir = Path(args.output_dir) if args.output_dir else Path(_default_runs_root) / args.label
 
     info(f"ACTS root:  {acts_root}")
     info(f"Devices:    {len(devices)} ({', '.join(b.get('short', s[-6:]) for b, s in zip(boards, devices))})")

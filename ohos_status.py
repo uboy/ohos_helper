@@ -578,7 +578,8 @@ def main() -> int:
 
     script_dir = Path(__file__).resolve().parent
     conf_dir = script_dir / "conf"
-    runs_dir = script_dir / "xts_full_runs"
+    _default_runs_root = os.environ.get("XTS_RUNS_DIR", os.path.join(os.environ.get("TMPDIR", "/tmp"), "ohos_xts_runs"))
+    runs_dir = Path(_default_runs_root)
 
     # 1. Detect running processes
     ps_output = _ps_aux()

@@ -22,7 +22,7 @@ GITEE_QUERY = SCRIPT_DIR / "gitee_util" / "gitee_query.py"
 PR_COMMANDS_JSON = SCRIPT_DIR / "gitee_util" / "pr_commands.json"
 OHOS_SH = SCRIPT_DIR / "ohos.sh"
 
-ARTIFACT_ROOT = SCRIPT_DIR / "test-artifacts"
+ARTIFACT_ROOT = Path(os.environ.get("TEST_ARTIFACT_ROOT", os.path.join(os.environ.get("TMPDIR", "/tmp"), "ohos_test_artifacts")))
 RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 ARTIFACT_DIR = ARTIFACT_ROOT / RUN_TIMESTAMP
 
