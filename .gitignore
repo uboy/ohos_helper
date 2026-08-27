@@ -31,3 +31,6 @@ conf/build-workarounds.yaml
 conf/wrapper-deps.lock.json
 conf/board-state.json
 conf/test_fixtures.json
+
+# Real reviewer list is local-only, see scripts/members.txt.example
+scripts/members.txt
